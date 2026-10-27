@@ -5,7 +5,7 @@ import WebKit
 
 @Observable
 final class AccountViewModel {
-  enum State: Equatable {
+  nonisolated enum State: Equatable {
     case signedOut
     case validating
     case signedIn

@@ -12,7 +12,7 @@ struct PlayerOverlay: View {
   @State private var scrubValue: Double = 0
   @State private var seekHUD: SeekHUD?
 
-  struct SeekHUD: Equatable {
+  nonisolated struct SeekHUD: Equatable {
     let id = UUID()
     let forward: Bool
   }

@@ -35,7 +35,7 @@ struct DiagnosticsView: View {
               Text(probe.profile).font(.subheadline.monospaced().weight(.semibold))
               Spacer()
               Text(probe.playabilityStatus ?? "—").font(.caption.monospaced())
-                .foregroundStyle(probe.source != nil ? .green : .secondary)
+                .foregroundStyle(probe.source != nil ? Color.green : Color.secondary)
             }
             Text("HLS: \(probe.hlsManifestURL != nil ? "yes" : "no") · muxed itags: \(probe.muxedItags.isEmpty ? "none" : probe.muxedItags.map(String.init).joined(separator: ",")) · ad placements: \(probe.hasAdPlacements ? "yes (ignored)" : "no")")
               .font(.caption)

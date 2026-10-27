@@ -27,7 +27,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
   }
 }
 
-enum RootTab: Hashable {
+nonisolated enum RootTab: Hashable {
   case home, subscriptions, library, search
 }
 

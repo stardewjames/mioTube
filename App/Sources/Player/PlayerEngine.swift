@@ -7,7 +7,7 @@ import UIKit
 /// Owns the one `AVPlayer`, its KVO/notification plumbing and the audio session.
 @Observable
 final class PlayerEngine {
-  enum Status: Equatable {
+  nonisolated enum Status: Equatable {
     case idle
     case loading
     case ready

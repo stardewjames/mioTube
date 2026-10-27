@@ -141,7 +141,7 @@ struct RemoteImage: View {
     }
   }
 
-  private struct TaskKey: Equatable {
+  nonisolated private struct TaskKey: Equatable {
     let url: URL?
     let size: CGSize
   }

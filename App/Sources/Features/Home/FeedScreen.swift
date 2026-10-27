@@ -2,12 +2,12 @@ import MioTubeCore
 import Observation
 import SwiftUI
 
-enum FeedStyle {
+nonisolated enum FeedStyle {
   case grid
   case list
 }
 
-enum Route: Hashable {
+nonisolated enum Route: Hashable {
   case channel(id: String, title: String)
   case playlist(id: String, title: String)
   case feed(FeedKey, title: String)

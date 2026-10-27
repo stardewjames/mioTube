@@ -98,5 +98,5 @@ final class AppEnvironment {
 
 extension EnvironmentValues {
   /// Shared namespace for card → watch zoom transitions.
-  @Entry var zoomNamespace: Namespace.ID?
+  @Entry var zoomNamespace: Namespace.ID? = nil
 }

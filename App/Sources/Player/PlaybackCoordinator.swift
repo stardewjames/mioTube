@@ -4,20 +4,20 @@ import Observation
 import SwiftUI
 import UIKit
 
-struct QueueItem: Identifiable, Hashable {
+nonisolated struct QueueItem: Identifiable, Hashable {
   let id = UUID()
   let video: VideoSummary
 }
 
-enum RepeatMode: String, CaseIterable {
+nonisolated enum RepeatMode: String, CaseIterable {
   case off, one, all
 }
 
-enum AdvanceReason {
+nonisolated enum AdvanceReason {
   case automatic, user
 }
 
-struct SponsorToast: Equatable, Identifiable {
+nonisolated struct SponsorToast: Equatable, Identifiable {
   enum Kind: Equatable {
     case skipped(from: Double)
     case muted
@@ -31,7 +31,7 @@ struct SponsorToast: Equatable, Identifiable {
 /// Single owner of queue, SponsorBlock, audio session, PiP state and rotation.
 @Observable
 final class PlaybackCoordinator {
-  enum Phase: Equatable {
+  nonisolated enum Phase: Equatable {
     case idle
     case resolving
     case playing
@@ -86,7 +86,7 @@ final class PlaybackCoordinator {
   @ObservationIgnored private var lastProgressSave: Date = .distantPast
   @ObservationIgnored private var lifecycleTokens: [any NSObjectProtocol] = []
 
-  private struct SkipConfig: Equatable {
+  nonisolated private struct SkipConfig: Equatable {
     var enabled: Set<SponsorCategory>
     var overrides: [SponsorCategory: SponsorAction]
     var forced: Bool
@@ -140,6 +140,14 @@ final class PlaybackCoordinator {
   func watchScreenDidAppear() {
     pendingPiPRestore?(true)
     pendingPiPRestore = nil
+  }
+
+  func playNext(_ video: VideoSummary) {
+    guard !queue.isEmpty else {
+      play(video, present: false)
+      return
+    }
+    queue.insert(QueueItem(video: video), at: index + 1)
   }
 
   func advance(_ reason: AdvanceReason) {
@@ -493,9 +501,9 @@ final class PlaybackCoordinator {
     let center = NotificationCenter.default
     lifecycleTokens.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { @Sendable [weak self] _ in
       MainActor.assumeIsolated {
-        guard let self, current != nil else { return }
-        saveProgress(force: true)
-        engine.didEnterBackground(keepPlaying: settings.backgroundPlayback)
+        guard let self, self.current != nil else { return }
+        self.saveProgress(force: true)
+        self.engine.didEnterBackground(keepPlaying: self.settings.backgroundPlayback)
       }
     })
     lifecycleTokens.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { @Sendable [weak self] _ in
