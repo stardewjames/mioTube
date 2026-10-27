@@ -110,6 +110,8 @@ public actor URLSessionTransport: HTTPTransport {
     config.httpMaximumConnectionsPerHost = 6
     #if !canImport(FoundationNetworking)
     config.waitsForConnectivity = true
+    // Bounds the connectivity wait so offline playback fails fast instead of hanging.
+    config.timeoutIntervalForResource = 25
     #endif
     #if canImport(FoundationNetworking)
     config.urlCache = URLCache(memoryCapacity: 32 << 20, diskCapacity: 256 << 20, diskPath: "MioTubeHTTP")
