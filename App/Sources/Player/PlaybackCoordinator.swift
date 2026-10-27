@@ -1,0 +1,529 @@
+import AVFoundation
+import MioTubeCore
+import Observation
+import SwiftUI
+import UIKit
+
+struct QueueItem: Identifiable, Hashable {
+  let id = UUID()
+  let video: VideoSummary
+}
+
+enum RepeatMode: String, CaseIterable {
+  case off, one, all
+}
+
+enum AdvanceReason {
+  case automatic, user
+}
+
+struct SponsorToast: Equatable, Identifiable {
+  enum Kind: Equatable {
+    case skipped(from: Double)
+    case muted
+  }
+
+  let id = UUID()
+  let segment: SponsorSegment
+  let kind: Kind
+}
+
+/// Single owner of queue, SponsorBlock, audio session, PiP state and rotation.
+@Observable
+final class PlaybackCoordinator {
+  enum Phase: Equatable {
+    case idle
+    case resolving
+    case playing
+    case failed(PlaybackFailure)
+  }
+
+  static var shared: PlaybackCoordinator { AppEnvironment.shared.coordinator }
+
+  let engine = PlayerEngine()
+
+  private(set) var queue: [QueueItem] = []
+  private(set) var index = 0
+  var repeatMode: RepeatMode = .off
+  private(set) var phase: Phase = .idle
+  private(set) var info: WatchInfo?
+  var isWatchPresented = false
+  var isFullscreen = false {
+    didSet { if oldValue != isFullscreen { applyOrientation() } }
+  }
+  /// Drives the "playback unavailable" sheet.
+  var failure: PlaybackFailure?
+  private(set) var lastResolution: Resolution?
+
+  // SponsorBlock
+  private(set) var sponsorSegments: [SponsorSegment] = []
+  private(set) var fullVideoSponsored = false
+  var sponsorToast: SponsorToast?
+
+  // Captions
+  private(set) var captionTracks: [CaptionTrack] = []
+  private(set) var selectedCaption: CaptionTrack?
+  private(set) var currentCaption: String?
+  private(set) var isLoadingCaptions = false
+
+  private(set) var quality: QualityCap = .auto
+
+  @ObservationIgnored private let resolver: StreamResolver
+  @ObservationIgnored private let client: InnertubeClient
+  @ObservationIgnored private let sponsorBlock: SponsorBlockClient
+  @ObservationIgnored private let transport: any HTTPTransport
+  @ObservationIgnored private let settings: Settings
+  @ObservationIgnored private let progress: WatchProgressStore
+  @ObservationIgnored private let images: ImagePipeline
+  @ObservationIgnored private let nowPlaying = NowPlayingCenter()
+  @ObservationIgnored private var loadTask: Task<Void, Never>?
+  @ObservationIgnored private var toastTask: Task<Void, Never>?
+  @ObservationIgnored private var skipEngine: SkipEngine?
+  @ObservationIgnored private var skipConfig: SkipConfig?
+  @ObservationIgnored private var suppressedSegments: [SponsorSegment] = []
+  @ObservationIgnored private var captions: Captions?
+  @ObservationIgnored private var pendingPiPRestore: ((Bool) -> Void)?
+  @ObservationIgnored private var lastProgressSave: Date = .distantPast
+  @ObservationIgnored private var lifecycleTokens: [any NSObjectProtocol] = []
+
+  private struct SkipConfig: Equatable {
+    var enabled: Set<SponsorCategory>
+    var overrides: [SponsorCategory: SponsorAction]
+    var forced: Bool
+  }
+
+  init(
+    resolver: StreamResolver, client: InnertubeClient, sponsorBlock: SponsorBlockClient, transport: any HTTPTransport,
+    settings: Settings, progress: WatchProgressStore, images: ImagePipeline
+  ) {
+    self.resolver = resolver
+    self.client = client
+    self.sponsorBlock = sponsorBlock
+    self.transport = transport
+    self.settings = settings
+    self.progress = progress
+    self.images = images
+    quality = settings.defaultQuality
+    engine.rate = Float(settings.defaultSpeed)
+    engine.onTick = { [weak self] position in self?.tick(position) }
+    engine.onEnd = { [weak self] in self?.advance(.automatic) }
+    engine.onStateChange = { [weak self] in self?.refreshNowPlaying() }
+    engine.onSystemPause = { [weak self] in self?.saveProgress(force: true) }
+    engine.surface.onRestoreUserInterface = { [weak self] completion in
+      guard let self else { return completion(true) }
+      if isWatchPresented {
+        completion(true)
+      } else {
+        pendingPiPRestore = completion
+        isWatchPresented = true
+      }
+    }
+    observeLifecycle()
+  }
+
+  var current: QueueItem? { queue.indices.contains(index) ? queue[index] : nil }
+  var hasNext: Bool { index + 1 < queue.count || (settings.autoplay && nextRelated != nil) }
+  var hasPrevious: Bool { index > 0 }
+
+  // MARK: Commands
+
+  func play(_ video: VideoSummary, queue items: [VideoSummary]? = nil, present: Bool = true) {
+    var list = items ?? [video]
+    if !list.contains(where: { $0.videoID == video.videoID }) { list.insert(video, at: 0) }
+    queue = list.map(QueueItem.init(video:))
+    index = list.firstIndex { $0.videoID == video.videoID } ?? 0
+    if present { isWatchPresented = true }
+    startCurrent()
+  }
+
+  /// Called by the watch screen once visible, finishing a PiP "restore" request.
+  func watchScreenDidAppear() {
+    pendingPiPRestore?(true)
+    pendingPiPRestore = nil
+  }
+
+  func advance(_ reason: AdvanceReason) {
+    if reason == .automatic, repeatMode == .one {
+      engine.seek(to: 0)
+      engine.play()
+      return
+    }
+    saveProgress(force: true)
+    if index + 1 < queue.count {
+      index += 1
+    } else if repeatMode == .all, !queue.isEmpty {
+      index = 0
+    } else if settings.autoplay, let next = nextRelated {
+      queue.append(QueueItem(video: next))
+      index = queue.count - 1
+    } else {
+      if reason == .automatic { engine.pause() }
+      return
+    }
+    startCurrent()
+  }
+
+  func previous() {
+    if engine.position > 5 || index == 0 {
+      engine.seek(to: 0)
+      return
+    }
+    saveProgress(force: true)
+    index -= 1
+    startCurrent()
+  }
+
+  func jump(to item: QueueItem) {
+    guard let target = queue.firstIndex(of: item), target != index else { return }
+    saveProgress(force: true)
+    index = target
+    startCurrent()
+  }
+
+  func close() {
+    saveProgress(force: true)
+    loadTask?.cancel()
+    engine.stop()
+    nowPlaying.clear()
+    queue = []
+    index = 0
+    info = nil
+    phase = .idle
+    isFullscreen = false
+    isWatchPresented = false
+    resetPerVideoState()
+  }
+
+  func retry() {
+    failure = nil
+    if let id = current?.video.videoID { Task { await resolver.invalidate(videoID: id) } }
+    startCurrent()
+  }
+
+  func toggleMute() {
+    engine.setMuted(!engine.isMuted)
+    skipEngine?.userToggledMute()
+  }
+
+  func setQuality(_ cap: QualityCap) {
+    quality = cap
+    engine.setQuality(cap)
+  }
+
+  func setSpeed(_ speed: Double) {
+    engine.rate = Float(speed)
+  }
+
+  func undoSkip() {
+    guard let toast = sponsorToast, case .skipped(let from) = toast.kind else { return }
+    suppressedSegments.append(toast.segment)
+    skipEngine?.suppress(toast.segment)
+    engine.seek(to: from)
+    sponsorToast = nil
+  }
+
+  func selectCaption(_ track: CaptionTrack?) {
+    selectedCaption = track
+    captions = nil
+    currentCaption = nil
+    guard let track else { return }
+    settings.preferredCaptionLanguage = track.languageCode
+    isLoadingCaptions = true
+    let transport = transport
+    Task {
+      let loaded = await CaptionsParser.fetch(track, transport: transport)
+      guard selectedCaption == track else { return }
+      isLoadingCaptions = false
+      if let loaded {
+        captions = loaded
+        currentCaption = loaded.cue(at: engine.position)?.text
+      } else {
+        // Unavailable (403/empty): hide the entry rather than retrying.
+        captionTracks.removeAll { $0 == track }
+        selectedCaption = nil
+      }
+    }
+  }
+
+  var currentChapter: Chapter? {
+    guard let chapters = info?.chapters, !chapters.isEmpty else { return nil }
+    return chapters.last { $0.startSeconds <= engine.position }
+  }
+
+  // MARK: Loading
+
+  private var nextRelated: VideoSummary? {
+    let played = Set(queue.map(\.video.videoID))
+    return info?.related.first { !played.contains($0.videoID) && !$0.isLive }
+  }
+
+  private func resetPerVideoState() {
+    sponsorSegments = []
+    fullVideoSponsored = false
+    sponsorToast = nil
+    skipEngine = nil
+    skipConfig = nil
+    suppressedSegments = []
+    captionTracks = []
+    selectedCaption = nil
+    captions = nil
+    currentCaption = nil
+    failure = nil
+  }
+
+  private func startCurrent() {
+    loadTask?.cancel()
+    guard let item = current else { return }
+    resetPerVideoState()
+    engine.pause()
+    info = WatchInfo(summary: item.video)
+    phase = .resolving
+    refreshNowPlaying()
+    loadArtwork(for: item.video)
+    let videoID = item.video.videoID
+    let maxHeight = quality.maxHeight
+    let resolver = resolver
+
+    loadTask = Task {
+      let resolution = await withTimeout(seconds: 30) {
+        await resolver.resolveDetailed(videoID: videoID, maxHeight: maxHeight)
+      }
+      guard !Task.isCancelled, current?.id == item.id else { return }
+      guard let resolution else {
+        fail(PlaybackFailure(reasons: [.init(profile: "all", reason: "Timed out after 30 s")]))
+        return
+      }
+      lastResolution = resolution
+      if case .unavailable(let failure) = resolution.source {
+        fail(failure)
+        return
+      }
+      let resume = await progress.resumePosition(for: videoID)
+      guard !Task.isCancelled, current?.id == item.id else { return }
+      engine.load(
+        resolution.source, startAt: resume, quality: quality, pipAutoStart: settings.pipAutoStart
+      )
+      phase = .playing
+
+      async let watch = loadWatchInfo(videoID: videoID, player: resolution.player ?? .null)
+      async let segments = loadSegments(videoID: videoID)
+      let (loadedInfo, loadedSegments) = await (watch, segments)
+      guard !Task.isCancelled, current?.id == item.id else { return }
+      if let loadedInfo {
+        info = loadedInfo
+        captionTracks = loadedInfo.captionTracks
+        AppEnvironment.shared.diagnostics.record(watchDroppedAds: loadedInfo.droppedAds)
+        if let preferred = settings.preferredCaptionLanguage, selectedCaption == nil,
+           let track = loadedInfo.captionTracks.first(where: { $0.languageCode == preferred && !$0.isAutomatic }) {
+          selectCaption(track)
+        }
+      }
+      sponsorSegments = loadedSegments
+      rebuildSkipEngineIfNeeded(force: true)
+      refreshNowPlaying()
+    }
+  }
+
+  private func fail(_ failure: PlaybackFailure) {
+    phase = .failed(failure)
+    self.failure = failure
+  }
+
+  private func loadWatchInfo(videoID: String, player: JSONValue) async -> WatchInfo? {
+    guard let next = try? await client.post("next", ["videoId": .string(videoID)]) else { return nil }
+    return WatchParser.parse(next: next, player: player, adFilter: .init())
+  }
+
+  private func loadSegments(videoID: String) async -> [SponsorSegment] {
+    var segments: [SponsorSegment] = []
+    if settings.sponsorBlockEnabled {
+      segments = (try? await sponsorBlock.segments(
+        videoID: videoID, categories: SponsorCategory.allCases, server: settings.sponsorServerURL,
+        privacyMode: settings.sponsorBlockPrivacyMode
+      )) ?? []
+    }
+    return segments
+  }
+
+  private func loadArtwork(for video: VideoSummary) {
+    guard let url = video.bestThumbnailURL else { return }
+    let images = images
+    Task {
+      let image = await images.image(for: url, target: CGSize(width: 512, height: 288), scale: 1)
+      guard current?.video.videoID == video.videoID else { return }
+      nowPlaying.setArtwork(image, for: url)
+    }
+  }
+
+  // MARK: SponsorBlock
+
+  static let testSegment = SponsorSegment(uuid: "miotube-test-segment", start: 10, end: 15, category: .sponsor, action: .skip, votes: 0)
+
+  private func rebuildSkipEngineIfNeeded(force: Bool = false) {
+    let config = SkipConfig(
+      enabled: settings.activeSponsorCategories,
+      overrides: settings.sponsorCategoryActions,
+      forced: settings.forceTestSponsorSegment
+    )
+    guard force || config != skipConfig else { return }
+    skipConfig = config
+    var segments = sponsorSegments
+    var enabled = config.enabled
+    if config.forced {
+      segments.append(Self.testSegment)
+      enabled.insert(Self.testSegment.category)
+    }
+    var engine = SkipEngine(segments: segments, enabled: enabled, categoryOverrides: config.overrides)
+    for segment in suppressedSegments { engine.suppress(segment) }
+    skipEngine = engine
+    fullVideoSponsored = engine.fullVideoSponsored
+  }
+
+  private func tick(_ position: Double) {
+    if skipEngine != nil || settings.forceTestSponsorSegment { rebuildSkipEngineIfNeeded() }
+    if var engineState = skipEngine, phase == .playing {
+      let decision = engineState.evaluate(position: position, muted: engine.isMuted)
+      skipEngine = engineState
+      switch decision {
+      case .skip(let target, let segment):
+        engine.seek(to: target)
+        show(SponsorToast(segment: segment, kind: .skipped(from: position)))
+      case .mute(let muted, let segment):
+        engine.setMuted(muted)
+        if muted, let segment {
+          show(SponsorToast(segment: segment, kind: .muted))
+        } else if case .muted = sponsorToast?.kind {
+          sponsorToast = nil
+        }
+      case .none:
+        break
+      }
+    }
+    if let captions {
+      let text = captions.cue(at: position)?.text
+      if text != currentCaption { currentCaption = text }
+    }
+    saveProgress(force: false)
+  }
+
+  private func show(_ toast: SponsorToast) {
+    sponsorToast = toast
+    toastTask?.cancel()
+    guard case .skipped = toast.kind else { return }
+    toastTask = Task {
+      try? await Task.sleep(for: .seconds(5))
+      if !Task.isCancelled, sponsorToast?.id == toast.id { sponsorToast = nil }
+    }
+  }
+
+  // MARK: Progress
+
+  private func saveProgress(force: Bool) {
+    guard let id = current?.video.videoID, engine.duration > 0, info?.isLive != true else { return }
+    let now = Date()
+    guard force || now.timeIntervalSince(lastProgressSave) >= 5 else { return }
+    lastProgressSave = now
+    let position = engine.position
+    let duration = engine.duration
+    let progress = progress
+    Task {
+      await progress.record(videoID: id, position: position, duration: duration)
+      await progress.flush()
+    }
+  }
+
+  // MARK: Now Playing & remote commands
+
+  func activateRemoteCommands() {
+    nowPlaying.activate(NowPlayingCenter.Handlers(
+      play: { [weak self] in
+        guard let self, current != nil else { return false }
+        engine.play()
+        return true
+      },
+      pause: { [weak self] in
+        guard let self, current != nil else { return false }
+        engine.pause()
+        saveProgress(force: true)
+        return true
+      },
+      toggle: { [weak self] in
+        guard let self, current != nil else { return false }
+        engine.togglePlayPause()
+        return true
+      },
+      next: { [weak self] in
+        guard let self, hasNext else { return false }
+        advance(.user)
+        return true
+      },
+      previous: { [weak self] in
+        guard let self, current != nil else { return false }
+        previous()
+        return true
+      },
+      seek: { [weak self] seconds in
+        guard let self, current != nil else { return false }
+        engine.seek(to: seconds)
+        return true
+      },
+      skip: { [weak self] delta in
+        guard let self, current != nil else { return false }
+        engine.skip(by: delta)
+        return true
+      }
+    ))
+  }
+
+  private func refreshNowPlaying() {
+    guard let item = current else { return }
+    nowPlaying.update(
+      title: info?.title.isEmpty == false ? info!.title : item.video.title,
+      artist: info?.channel?.title ?? item.video.channelName,
+      duration: engine.duration,
+      elapsed: engine.position,
+      rate: engine.isPlaying ? engine.rate : 0,
+      isLive: info?.isLive ?? item.video.isLive
+    )
+  }
+
+  // MARK: Lifecycle & rotation
+
+  private func observeLifecycle() {
+    let center = NotificationCenter.default
+    lifecycleTokens.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { @Sendable [weak self] _ in
+      MainActor.assumeIsolated {
+        guard let self, current != nil else { return }
+        saveProgress(force: true)
+        engine.didEnterBackground(keepPlaying: settings.backgroundPlayback)
+      }
+    })
+    lifecycleTokens.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { @Sendable [weak self] _ in
+      MainActor.assumeIsolated { self?.engine.willEnterForeground() }
+    })
+  }
+
+  private func applyOrientation() {
+    guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else { return }
+    var controller = scene.keyWindow?.rootViewController
+    while let current = controller {
+      current.setNeedsUpdateOfSupportedInterfaceOrientations()
+      controller = current.presentedViewController
+    }
+    scene.requestGeometryUpdate(.iOS(interfaceOrientations: isFullscreen ? .landscapeRight : .portrait)) { _ in }
+  }
+}
+
+/// Runs `operation`, returning nil if it does not finish within `seconds`.
+func withTimeout<T: Sendable>(seconds: Double, _ operation: @escaping @Sendable () async -> T) async -> T? {
+  await withTaskGroup(of: T?.self) { group in
+    group.addTask { await operation() }
+    group.addTask {
+      try? await Task.sleep(for: .seconds(seconds))
+      return nil
+    }
+    let first = await group.next() ?? nil
+    group.cancelAll()
+    return first
+  }
+}
