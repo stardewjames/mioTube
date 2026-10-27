@@ -1,7 +1,7 @@
 {
   "apiKey": "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
   "metadataProfile": "web",
-  "playbackOrder": ["web_safari", "mweb", "web_embedded", "visionos", "tv"],
+  "playbackOrder": ["visionos", "web_safari", "mweb", "web_embedded", "tv"],
   "profiles": [
     {
       "id": "web",

@@ -3,6 +3,7 @@ import SwiftUI
 
 /// Glass controls over the video surface: scrubber with chapter ticks, transport, speed,
 /// quality, captions, PiP, fullscreen. Auto-hides after 3 s of no touch while playing.
+/// Swipe up enters fullscreen, swipe down leaves it.
 struct PlayerOverlay: View {
   @Environment(AppEnvironment.self) private var env
   @Environment(\.dismiss) private var dismiss
@@ -17,8 +18,32 @@ struct PlayerOverlay: View {
     let forward: Bool
   }
 
+  /// Control sizes scale with the surface: compact over the inline 16:9 video, larger in
+  /// fullscreen.
+  nonisolated struct Metrics {
+    let chrome: CGFloat
+    let chromeFont: Font
+    let side: CGFloat
+    let play: CGFloat
+    let transportFont: Font
+    let playFont: Font
+    let spacing: CGFloat
+    let padding: CGFloat
+    let timeFont: Font
+
+    static let inline = Metrics(
+      chrome: 28, chromeFont: .footnote.weight(.semibold), side: 34, play: 48, transportFont: .callout,
+      playFont: .title2, spacing: 18, padding: 8, timeFont: .caption2
+    )
+    static let fullscreen = Metrics(
+      chrome: 40, chromeFont: .body.weight(.semibold), side: 50, play: 72, transportFont: .title3,
+      playFont: .largeTitle, spacing: 32, padding: 20, timeFont: .caption
+    )
+  }
+
   private var coordinator: PlaybackCoordinator { env.coordinator }
   private var engine: PlayerEngine { env.coordinator.engine }
+  private var metrics: Metrics { coordinator.isFullscreen ? .fullscreen : .inline }
   private var isFailed: Bool {
     if case .failed = coordinator.phase { return true }
     return false
@@ -34,6 +59,7 @@ struct PlayerOverlay: View {
               .onEnded { value in doubleTap(forward: value.location.x > proxy.size.width / 2) }
               .exclusively(before: TapGesture().onEnded { toggleControls() })
           )
+          .simultaneousGesture(DragGesture(minimumDistance: 24).onEnded(swipe))
 
         if let seekHUD {
           HStack {
@@ -47,12 +73,15 @@ struct PlayerOverlay: View {
         }
 
         if controlsVisible {
-          controls(width: proxy.size.width)
+          controls
             .transition(.opacity)
         }
 
         if engine.isBuffering || coordinator.phase == .resolving || engine.status == .loading {
-          ProgressView().controlSize(.large).tint(.white).allowsHitTesting(false)
+          ProgressView()
+            .controlSize(coordinator.isFullscreen ? .large : .regular)
+            .tint(.white)
+            .allowsHitTesting(false)
         }
       }
       .overlay(alignment: .top) { sponsorToast }
@@ -68,7 +97,7 @@ struct PlayerOverlay: View {
 
   // MARK: Controls
 
-  private func controls(width: CGFloat) -> some View {
+  private var controls: some View {
     VStack(spacing: 0) {
       topBar
       Spacer(minLength: 0)
@@ -76,48 +105,52 @@ struct PlayerOverlay: View {
       if isFailed {
         Button("Retry", systemImage: "arrow.clockwise") { coordinator.retry() }
           .buttonStyle(.glass)
-          .controlSize(.large)
       } else {
         transport
       }
       Spacer(minLength: 0)
       if !isFailed { scrubber }
     }
-    .padding(coordinator.isFullscreen ? 20 : 10)
+    .padding(metrics.padding)
     .background(
-      LinearGradient(colors: [.black.opacity(0.45), .clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
+      LinearGradient(colors: [.black.opacity(0.4), .clear, .black.opacity(0.5)], startPoint: .top, endPoint: .bottom)
         .allowsHitTesting(false)
     )
     .foregroundStyle(.white)
   }
 
+  private func chromeIcon(_ name: String) -> some View {
+    Image(systemName: name)
+      .font(metrics.chromeFont)
+      .frame(width: metrics.chrome, height: metrics.chrome)
+  }
+
   private var topBar: some View {
-    HStack(spacing: 10) {
+    HStack(spacing: 8) {
       Button {
         if coordinator.isFullscreen { coordinator.isFullscreen = false } else { dismiss() }
       } label: {
-        Image(systemName: coordinator.isFullscreen ? "arrow.down.right.and.arrow.up.left" : "chevron.down")
-          .frame(width: 36, height: 36)
+        chromeIcon(coordinator.isFullscreen ? "arrow.down.right.and.arrow.up.left" : "chevron.down")
       }
       .glassControl()
       .accessibilityLabel(coordinator.isFullscreen ? "Exit full screen" : "Minimize")
 
       if let chapter = coordinator.currentChapter {
         Text(chapter.title)
-          .font(.caption.weight(.semibold))
+          .font(.caption2.weight(.semibold))
           .lineLimit(1)
-          .padding(.horizontal, 10)
-          .padding(.vertical, 6)
+          .padding(.horizontal, 8)
+          .padding(.vertical, 5)
           .glassControl(interactive: false)
       }
       Spacer()
-      GlassEffectContainer(spacing: 8) {
-        HStack(spacing: 8) {
+      GlassEffectContainer(spacing: 6) {
+        HStack(spacing: 6) {
           captionsMenu
           settingsMenu
           if engine.isPictureInPicturePossible {
             Button { engine.togglePictureInPicture() } label: {
-              Image(systemName: engine.isPiPActive ? "pip.exit" : "pip.enter").frame(width: 36, height: 36)
+              chromeIcon(engine.isPiPActive ? "pip.exit" : "pip.enter")
             }
             .glassControl()
             .accessibilityLabel("Picture in Picture")
@@ -144,8 +177,7 @@ struct PlayerOverlay: View {
         }
       }
     } label: {
-      Image(systemName: coordinator.selectedCaption == nil ? "captions.bubble" : "captions.bubble.fill")
-        .frame(width: 36, height: 36)
+      chromeIcon(coordinator.selectedCaption == nil ? "captions.bubble" : "captions.bubble.fill")
     }
     .glassControl()
     .disabled(coordinator.captionTracks.isEmpty)
@@ -177,48 +209,43 @@ struct PlayerOverlay: View {
         coordinator.toggleMute()
       }
     } label: {
-      Image(systemName: "gearshape").frame(width: 36, height: 36)
+      chromeIcon("gearshape")
     }
     .glassControl()
     .accessibilityLabel("Playback settings")
   }
 
-  private var transport: some View {
-    GlassEffectContainer(spacing: 24) {
-      HStack(spacing: coordinator.isFullscreen ? 28 : 14) {
-        Button { coordinator.previous(); touch() } label: {
-          Image(systemName: "backward.end.fill").font(.title3).frame(width: 48, height: 48)
-        }
-        .glassControl()
-        .accessibilityLabel("Previous")
+  private func transportButton(_ symbol: String, label: String, enabled: Bool = true, action: @escaping () -> Void) -> some View {
+    Button {
+      action()
+      touch()
+    } label: {
+      Image(systemName: symbol)
+        .font(metrics.transportFont)
+        .frame(width: metrics.side, height: metrics.side)
+    }
+    .glassControl()
+    .disabled(!enabled)
+    .accessibilityLabel(label)
+  }
 
-        Button { engine.skip(by: -10); touch() } label: {
-          Image(systemName: "gobackward.10").font(.title3).frame(width: 44, height: 44)
-        }
-        .glassControl()
-        .accessibilityLabel("Back 10 seconds")
+  private var transport: some View {
+    GlassEffectContainer(spacing: metrics.spacing) {
+      HStack(spacing: metrics.spacing) {
+        transportButton("backward.end.fill", label: "Previous") { coordinator.previous() }
+        transportButton("gobackward.10", label: "Back 10 seconds") { engine.skip(by: -10) }
 
         Button { engine.togglePlayPause(); touch() } label: {
           Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
-            .font(.largeTitle)
+            .font(metrics.playFont)
             .contentTransition(.symbolEffect(.replace))
-            .frame(width: 72, height: 72)
+            .frame(width: metrics.play, height: metrics.play)
         }
         .glassControl()
         .accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
 
-        Button { engine.skip(by: 10); touch() } label: {
-          Image(systemName: "goforward.10").font(.title3).frame(width: 44, height: 44)
-        }
-        .glassControl()
-        .accessibilityLabel("Forward 10 seconds")
-
-        Button { coordinator.advance(.user); touch() } label: {
-          Image(systemName: "forward.end.fill").font(.title3).frame(width: 48, height: 48)
-        }
-        .glassControl()
-        .disabled(!coordinator.hasNext)
-        .accessibilityLabel("Next")
+        transportButton("goforward.10", label: "Forward 10 seconds") { engine.skip(by: 10) }
+        transportButton("forward.end.fill", label: "Next", enabled: coordinator.hasNext) { coordinator.advance(.user) }
       }
     }
   }
@@ -226,7 +253,7 @@ struct PlayerOverlay: View {
   private var scrubber: some View {
     let duration = max(engine.duration, 1)
     let shown = scrubbing ? scrubValue : engine.position
-    return VStack(spacing: 6) {
+    return VStack(spacing: coordinator.isFullscreen ? 6 : 0) {
       ZStack {
         Slider(
           value: Binding(get: { shown }, set: { scrubValue = $0 }),
@@ -243,10 +270,11 @@ struct PlayerOverlay: View {
           }
         )
         .tint(.red)
+        .controlSize(coordinator.isFullscreen ? .regular : .mini)
         .disabled(coordinator.info?.isLive == true || engine.duration <= 0)
         chapterTicks(duration: duration)
       }
-      HStack {
+      HStack(spacing: 6) {
         Text(Format.duration(shown)).monospacedDigit()
         if coordinator.fullVideoSponsored {
           Label("Sponsored video", systemImage: "dollarsign.circle").labelStyle(.iconOnly).foregroundStyle(.yellow)
@@ -261,13 +289,12 @@ struct PlayerOverlay: View {
           coordinator.isFullscreen.toggle()
           touch()
         } label: {
-          Image(systemName: coordinator.isFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-            .frame(width: 32, height: 32)
+          chromeIcon(coordinator.isFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
         }
         .glassControl()
         .accessibilityLabel("Full screen")
       }
-      .font(.caption)
+      .font(metrics.timeFont)
     }
   }
 
@@ -278,7 +305,7 @@ struct PlayerOverlay: View {
         let x = proxy.size.width * chapter.startSeconds / duration
         Rectangle()
           .fill(.white.opacity(0.9))
-          .frame(width: 2, height: 8)
+          .frame(width: 2, height: coordinator.isFullscreen ? 8 : 6)
           .padding(.horizontal, 6)
           .contentShape(.rect)
           .position(x: x, y: proxy.size.height / 2)
@@ -289,7 +316,7 @@ struct PlayerOverlay: View {
           .accessibilityLabel("Chapter: \(chapter.title)")
       }
     }
-    .frame(height: 24)
+    .frame(height: coordinator.isFullscreen ? 24 : 18)
   }
 
   @ViewBuilder
@@ -306,7 +333,7 @@ struct PlayerOverlay: View {
           GlassToast(text: "Muted \(toast.segment.category.displayName.lowercased())", systemImage: "speaker.slash.fill")
         }
       }
-      .padding(.top, 56)
+      .padding(.top, coordinator.isFullscreen ? 64 : 44)
       .transition(.move(edge: .top).combined(with: .opacity))
     }
   }
@@ -320,6 +347,18 @@ struct PlayerOverlay: View {
   private func toggleControls() {
     controlsVisible.toggle()
     touch()
+  }
+
+  /// Vertical swipe: up enters fullscreen, down leaves it. Inline swipe-down stays with the
+  /// sheet (it minimizes the player).
+  private func swipe(_ value: DragGesture.Value) {
+    let dy = value.translation.height
+    guard abs(dy) > 50, abs(dy) > abs(value.translation.width) * 1.5 else { return }
+    if dy < 0, !coordinator.isFullscreen {
+      coordinator.isFullscreen = true
+    } else if dy > 0, coordinator.isFullscreen {
+      coordinator.isFullscreen = false
+    }
   }
 
   private func doubleTap(forward: Bool) {
@@ -339,14 +378,15 @@ struct CaptionOverlay: View {
 
   var body: some View {
     if let text = env.coordinator.currentCaption {
+      let fullscreen = env.coordinator.isFullscreen
       Text(text)
-        .font(.system(size: env.settings.preferredCaptionSize, weight: .medium))
+        .font(.system(size: env.settings.preferredCaptionSize * (fullscreen ? 1 : 0.8), weight: .medium))
         .foregroundStyle(.white)
         .multilineTextAlignment(.center)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
         .background(.black.opacity(0.6), in: .capsule)
-        .padding(.bottom, 64)
+        .padding(.bottom, fullscreen ? 72 : 40)
         .padding(.horizontal, 24)
         .allowsHitTesting(false)
         .transition(.opacity)

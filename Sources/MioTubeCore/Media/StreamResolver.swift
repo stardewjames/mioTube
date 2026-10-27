@@ -84,10 +84,13 @@ public actor StreamResolver {
     await resolveDetailed(videoID: videoID, maxHeight: maxHeight).source
   }
 
-  public func resolveDetailed(videoID: String, maxHeight: Int? = nil) async -> Resolution {
+  /// `excluding` skips profiles whose stream already failed in the player; such calls bypass
+  /// the cache and replace the cached (bad) resolution.
+  public func resolveDetailed(videoID: String, maxHeight: Int? = nil, excluding: Set<String> = []) async -> Resolution {
     let key = "\(videoID)|\(maxHeight ?? 1080)"
-    if let hit = cache[key], hit.expires > Date() { return hit.resolution }
-    let resolution = await run(videoID: videoID, maxHeight: maxHeight, stopAtFirstSuccess: true)
+    if excluding.isEmpty, let hit = cache[key], hit.expires > Date() { return hit.resolution }
+    if !excluding.isEmpty { cache[key] = nil }
+    let resolution = await run(videoID: videoID, maxHeight: maxHeight, stopAtFirstSuccess: true, excluding: excluding)
     if case .unavailable = resolution.source { return resolution }
     let ttl = min(Self.cacheLifetime, (resolution.player?["streamingData", "expiresInSeconds"]?.double ?? .infinity) - 60)
     cache[key] = (resolution, Date().addingTimeInterval(max(ttl, 60)))
@@ -96,7 +99,7 @@ public actor StreamResolver {
 
   /// Diagnostics: every profile, no short-circuit, no cache.
   public func probeAll(videoID: String) async -> [ProfileProbe] {
-    await run(videoID: videoID, maxHeight: nil, stopAtFirstSuccess: false).probes
+    await run(videoID: videoID, maxHeight: nil, stopAtFirstSuccess: false, excluding: []).probes
   }
 
   public func invalidate(videoID: String) {
@@ -105,13 +108,17 @@ public actor StreamResolver {
 
   // MARK: Profile loop
 
-  private func run(videoID: String, maxHeight: Int?, stopAtFirstSuccess: Bool) async -> Resolution {
+  private func run(videoID: String, maxHeight: Int?, stopAtFirstSuccess: Bool, excluding: Set<String>) async -> Resolution {
     let hasSession = await client.hasSession()
     var probes: [ProfileProbe] = []
     var offline = false
     for id in catalog.playbackOrder {
       guard let profile = catalog.profile(id) else {
         probes.append(.skipped(id, "unknown profile"))
+        continue
+      }
+      if excluding.contains(id) {
+        probes.append(.skipped(id, "skipped: stream failed in player"))
         continue
       }
       if profile.requiresJSPlayer {
@@ -192,11 +199,13 @@ public actor StreamResolver {
     return probe("no playable formats", nil)
   }
 
-  /// Muxed H.264 with a plain `url` (cipher-protected entries need the JS player).
+  /// Muxed H.264 with a plain `url`. Cipher-protected entries and URLs carrying the `n`
+  /// throttling parameter both need the `base.js` transform, so they are skipped (an
+  /// untransformed `n` URL answers 403).
   static func bestProgressive(_ formats: [JSONValue], maxHeight: Int) -> URL? {
     let candidates: [(itag: Int, height: Int, url: URL)] = formats.compactMap { format in
       guard let mime = format["mimeType"]?.string, mime.contains("avc1"),
-            let raw = format["url"]?.string, let url = URL(string: raw),
+            let raw = format["url"]?.string, let url = URL(string: raw), !needsJSTransform(url),
             let itag = format["itag"]?.int else { return nil }
       let height = format["height"]?.int ?? (itag == 22 ? 720 : itag == 18 ? 360 : 0)
       guard height <= maxHeight else { return nil }
@@ -206,6 +215,12 @@ public actor StreamResolver {
       return preferred.url
     }
     return candidates.max { $0.height < $1.height }?.url
+  }
+
+  /// Web-family stream URLs carry an `n` query parameter that must be rewritten by the
+  /// player JS; the Apple clients' URLs do not.
+  static func needsJSTransform(_ url: URL) -> Bool {
+    URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains { $0.name == "n" } ?? false
   }
 }
 

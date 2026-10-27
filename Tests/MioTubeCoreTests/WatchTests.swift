@@ -122,12 +122,12 @@ import Testing
     #expect(spy.requests.count == catalog.playbackOrder.count - 1)
   }
 
-  @Test func fallsThroughToFirstHLSProfile() async throws {
+  @Test func fallsThroughToNextHLSProfile() async throws {
     let unplayable = try Fixture.data("player.json")
-    let visionos = try Fixture.data("player_visionos.json")
+    let playable = try Fixture.data("player_visionos.json")
     let spy = SpyTransport { request in
       let name = request.jsonBody?["context", "client", "clientName"]?.string
-      return HTTPResponse(status: 200, data: name == "VISIONOS" ? visionos : unplayable)
+      return HTTPResponse(status: 200, data: name == "WEB_EMBEDDED_PLAYER" ? playable : unplayable)
     }
     let resolver = StreamResolver(client: try makeClient(spy), catalog: try testCatalog())
     let resolution = await resolver.resolveDetailed(videoID: "dQw4w9WgXcQ")
@@ -136,8 +136,8 @@ import Testing
       return
     }
     #expect(url.host == "manifest.googlevideo.com")
-    #expect(resolution.profileID == "visionos")
-    #expect(resolution.probes.map(\.profile) == ["web_safari", "mweb", "web_embedded", "visionos"])
+    #expect(resolution.profileID == "web_embedded")
+    #expect(resolution.probes.map(\.profile) == ["visionos", "web_safari", "mweb", "web_embedded"])
     #expect(resolution.probes[0].reason == "Video unavailable")
     let requests = spy.requests.count
     _ = await resolver.resolve(videoID: "dQw4w9WgXcQ")
@@ -147,7 +147,32 @@ import Testing
       let body = String(decoding: request.body ?? Data(), as: UTF8.self)
       #expect(!body.contains("adPlaybackContext") && !body.contains("playerAdParams"))
     }
-    #expect(spy.requests.contains { $0.jsonBody?["context", "thirdParty", "embedUrl"] != nil })
+    #expect(spy.requests.last?.jsonBody?["context", "thirdParty", "embedUrl"] != nil)
+  }
+
+  /// Regression: signed in, the cookie-carrying web clients answer OK with streams AVPlayer
+  /// cannot play; the cookie-less client must still be the one chosen.
+  @Test func signedInStillResolvesThroughCookielessClient() async throws {
+    let playable = try Fixture.data("player_visionos.json")
+    let spy = SpyTransport { _ in HTTPResponse(status: 200, data: playable) }
+    let resolver = StreamResolver(client: try makeClient(spy, session: testSession), catalog: try testCatalog())
+    let resolution = await resolver.resolveDetailed(videoID: "dQw4w9WgXcQ")
+    #expect(resolution.profileID == "visionos")
+    #expect(spy.requests.count == 1)
+    #expect(spy.requests.first?.headers["Cookie"] == nil)
+    #expect(spy.requests.first?.headers["Authorization"] == nil)
+  }
+
+  @Test func excludingAFailedProfileBypassesCacheAndFallsThrough() async throws {
+    let playable = try Fixture.data("player_visionos.json")
+    let spy = SpyTransport { _ in HTTPResponse(status: 200, data: playable) }
+    let resolver = StreamResolver(client: try makeClient(spy), catalog: try testCatalog())
+    #expect(await resolver.resolveDetailed(videoID: "v").profileID == "visionos")
+    let fallback = await resolver.resolveDetailed(videoID: "v", excluding: ["visionos"])
+    #expect(fallback.profileID == "web_safari")
+    #expect(fallback.probes.first?.reason == "skipped: stream failed in player")
+    // The fallback replaced the cached bad resolution.
+    #expect(await resolver.resolveDetailed(videoID: "v").profileID == "web_safari")
   }
 
   @Test func offlineFailsFastWithReasons() async throws {
@@ -172,5 +197,13 @@ import Testing
     #expect(StreamResolver.bestProgressive(formats, maxHeight: 1080)?.absoluteString == "https://v/22")
     #expect(StreamResolver.bestProgressive(formats, maxHeight: 480)?.absoluteString == "https://v/18")
     #expect(StreamResolver.bestProgressive(formats, maxHeight: 240) == nil)
+  }
+
+  /// Web-client URLs carry `n=`, which 403s without the base.js transform.
+  @Test func progressiveSkipsURLsNeedingNTransform() {
+    let formats: [JSONValue] = [
+      ["itag": 18, "height": 360, "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"", "url": "https://v/videoplayback?itag=18&n=AbCdEf&sig=x"],
+    ]
+    #expect(StreamResolver.bestProgressive(formats, maxHeight: 1080) == nil)
   }
 }

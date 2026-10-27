@@ -42,6 +42,8 @@ final class PlayerEngine {
   @ObservationIgnored var onStateChange: (() -> Void)?
   /// Pause triggered by the system (interruption, route loss) so progress can be saved.
   @ObservationIgnored var onSystemPause: (() -> Void)?
+  /// The loaded stream failed (item error, fatal playback error, or never became ready).
+  @ObservationIgnored var onFailure: ((String) -> Void)?
 
   @ObservationIgnored private var timeObserver: Any?
   @ObservationIgnored private var itemObservations: [NSKeyValueObservation] = []
@@ -53,6 +55,9 @@ final class PlayerEngine {
   @ObservationIgnored private var audioSessionActive = false
   @ObservationIgnored private var hosts = NSHashTable<PlayerHostView>.weakObjects()
   @ObservationIgnored private var qualityCap: QualityCap = .auto
+  @ObservationIgnored private var loadWatchdog: Task<Void, Never>?
+  /// A stream that is not ready by then is treated as failed so another profile can be tried.
+  static let loadTimeout: Duration = .seconds(15)
 
   init() {
     surface.engine = self
@@ -99,6 +104,11 @@ final class PlayerEngine {
     player.defaultRate = rate
     surface.setUpPictureInPicture(autoStart: pipAutoStart)
     if autoplay { activateAudioSession() }
+    loadWatchdog = Task { [weak self] in
+      try? await Task.sleep(for: Self.loadTimeout)
+      guard !Task.isCancelled, let self, self.status == .loading else { return }
+      self.fail("Stream did not start within 15 s")
+    }
   }
 
   func stop() {
@@ -112,6 +122,8 @@ final class PlayerEngine {
   }
 
   private func tearDownItem() {
+    loadWatchdog?.cancel()
+    loadWatchdog = nil
     itemObservations.forEach { $0.invalidate() }
     itemObservations = []
     itemNotificationTokens.forEach { NotificationCenter.default.removeObserver($0) }
@@ -247,6 +259,7 @@ final class PlayerEngine {
     switch itemStatus {
     case .readyToPlay:
       guard status == .loading else { return }
+      loadWatchdog?.cancel()
       status = .ready
       if pendingStart > 0 {
         seek(to: pendingStart)
@@ -261,8 +274,11 @@ final class PlayerEngine {
   }
 
   private func fail(_ message: String) {
+    guard status != .idle else { return }
+    loadWatchdog?.cancel()
     error = message
     status = .failed(message)
+    onFailure?(message)
   }
 
   // MARK: Audio session

@@ -81,7 +81,10 @@ import Testing
 @Suite struct ClientTests {
   @Test func bundledCatalogDecodes() throws {
     let catalog = try testCatalog()
-    #expect(catalog.playbackOrder == ["web_safari", "mweb", "web_embedded", "visionos", "tv"])
+    // The cookie-less Apple client goes first: authenticated web clients return streams that
+    // need the JS player / PO tokens and fail in AVPlayer.
+    #expect(catalog.playbackOrder.first == "visionos")
+    #expect(catalog.profile("visionos")?.supportsCookies == false)
     #expect(catalog.metadata.clientName == "WEB")
     for id in catalog.playbackOrder { #expect(catalog.profile(id) != nil) }
     #expect(catalog.profile("visionos")?.extraContext?["deviceModel"] == "RealityDevice17,1")

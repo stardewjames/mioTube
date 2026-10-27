@@ -83,6 +83,10 @@ final class PlaybackCoordinator {
   @ObservationIgnored private var suppressedSegments: [SponsorSegment] = []
   @ObservationIgnored private var captions: Captions?
   @ObservationIgnored private var pendingPiPRestore: ((Bool) -> Void)?
+  /// Profiles whose stream failed in AVPlayer for the current video, with the reasons.
+  @ObservationIgnored private var failedProfiles: Set<String> = []
+  @ObservationIgnored private var playerFailureReasons: [PlaybackFailure.Reason] = []
+  @ObservationIgnored private var fallbackTask: Task<Void, Never>?
   @ObservationIgnored private var lastProgressSave: Date = .distantPast
   @ObservationIgnored private var lifecycleTokens: [any NSObjectProtocol] = []
 
@@ -109,6 +113,7 @@ final class PlaybackCoordinator {
     engine.onEnd = { [weak self] in self?.advance(.automatic) }
     engine.onStateChange = { [weak self] in self?.refreshNowPlaying() }
     engine.onSystemPause = { [weak self] in self?.saveProgress(force: true) }
+    engine.onFailure = { [weak self] message in self?.streamFailed(message) }
     engine.surface.onRestoreUserInterface = { [weak self] completion in
       guard let self else { return completion(true) }
       if isWatchPresented {
@@ -277,6 +282,41 @@ final class PlaybackCoordinator {
     captions = nil
     currentCaption = nil
     failure = nil
+    fallbackTask?.cancel()
+    failedProfiles = []
+    playerFailureReasons = []
+  }
+
+  /// A resolved stream would not play (e.g. it needs a JS transform or PO token): re-resolve
+  /// with that profile excluded and resume at the same position.
+  private func streamFailed(_ message: String) {
+    guard phase == .playing, let item = current, let profile = lastResolution?.profileID else { return }
+    failedProfiles.insert(profile)
+    playerFailureReasons.append(.init(profile: profile, reason: "player: \(message)"))
+    phase = .resolving
+    let position = engine.position
+    let excluded = failedProfiles
+    let videoID = item.video.videoID
+    let maxHeight = quality.maxHeight
+    let resolver = resolver
+    fallbackTask?.cancel()
+    fallbackTask = Task {
+      let resolution = await withTimeout(seconds: 30) {
+        await resolver.resolveDetailed(videoID: videoID, maxHeight: maxHeight, excluding: excluded)
+      }
+      guard !Task.isCancelled, current?.id == item.id else { return }
+      guard let resolution, resolution.source.url != nil else {
+        var reasons = playerFailureReasons
+        if case .unavailable(let failure)? = resolution?.source {
+          reasons += failure.reasons.filter { !excluded.contains($0.profile) }
+        }
+        fail(PlaybackFailure(reasons: reasons))
+        return
+      }
+      lastResolution = resolution
+      engine.load(resolution.source, startAt: position, quality: quality, pipAutoStart: settings.pipAutoStart)
+      phase = .playing
+    }
   }
 
   private func startCurrent() {
