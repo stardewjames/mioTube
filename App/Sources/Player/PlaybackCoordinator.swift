@@ -48,6 +48,10 @@ final class PlaybackCoordinator {
   private(set) var phase: Phase = .idle
   private(set) var info: WatchInfo?
   var isWatchPresented = false
+  static let miniPlayerZoomID = "mini-player"
+  /// `matchedTransitionSource` id the watch screen zooms from/to: the tapped card when opening
+  /// from a feed, then the mini-player, so minimizing shrinks the player into the mini-player.
+  var watchZoomSource: String = PlaybackCoordinator.miniPlayerZoomID
   var isFullscreen = false {
     didSet { if oldValue != isFullscreen { applyOrientation() } }
   }
@@ -138,7 +142,10 @@ final class PlaybackCoordinator {
     if !list.contains(where: { $0.videoID == video.videoID }) { list.insert(video, at: 0) }
     queue = list.map(QueueItem.init(video:))
     index = list.firstIndex { $0.videoID == video.videoID } ?? 0
-    if present { isWatchPresented = true }
+    if present {
+      if !isWatchPresented { watchZoomSource = video.videoID }
+      isWatchPresented = true
+    }
     startCurrent()
   }
 

@@ -6,6 +6,7 @@ import SwiftUI
 struct MiniPlayerBar: View {
   @Environment(AppEnvironment.self) private var env
   @Environment(\.tabViewBottomAccessoryPlacement) private var placement
+  @Environment(\.zoomNamespace) private var namespace
 
   var body: some View {
     let coordinator = env.coordinator
@@ -19,6 +20,7 @@ struct MiniPlayerBar: View {
         }
         .frame(width: 64, height: 36)
         .clipShape(.rect(cornerRadius: 6))
+        .modifier(ZoomSource(id: PlaybackCoordinator.miniPlayerZoomID, namespace: namespace))
 
         VStack(alignment: .leading, spacing: 1) {
           Text(coordinator.info?.title ?? item.video.title)
@@ -52,7 +54,10 @@ struct MiniPlayerBar: View {
       .padding(.horizontal, 10)
       .frame(height: 56)
       .contentShape(.rect)
-      .onTapGesture { coordinator.isWatchPresented = true }
+      .onTapGesture {
+        coordinator.watchZoomSource = PlaybackCoordinator.miniPlayerZoomID
+        coordinator.isWatchPresented = true
+      }
       .buttonStyle(.plain)
     } else {
       HStack {

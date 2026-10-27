@@ -34,8 +34,14 @@ struct WatchView: View {
     .persistentSystemOverlays(coordinator.isFullscreen ? .hidden : .automatic)
     // Also disables the zoom transition's drag-to-dismiss; the player handles vertical swipes.
     .interactiveDismissDisabled()
-    .modifier(ZoomDestination(id: coordinator.current?.video.videoID, namespace: namespace))
+    .modifier(ZoomDestination(id: coordinator.watchZoomSource, namespace: namespace))
     .onAppear { coordinator.watchScreenDidAppear() }
+    .task {
+      // Open from the tapped card, but once on screen retarget the zoom so closing shrinks
+      // the player into the mini-player instead of back to the feed card.
+      try? await Task.sleep(for: .milliseconds(600))
+      coordinator.watchZoomSource = PlaybackCoordinator.miniPlayerZoomID
+    }
     .sheet(item: $coordinator.failure) { failure in
       PlaybackFailureSheet(failure: failure)
     }
