@@ -93,11 +93,13 @@ final class PiPDelegate: NSObject, AVPictureInPictureControllerDelegate {
     _ controller: AVPictureInPictureController,
     restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
   ) {
+    // AVKit calls this on the main thread and expects the handler to be invoked there.
+    nonisolated(unsafe) let completion = completionHandler
     MainActor.assumeIsolated {
       if let onRestore {
-        onRestore(completionHandler)
+        onRestore(completion)
       } else {
-        completionHandler(true)
+        completion(true)
       }
     }
   }
