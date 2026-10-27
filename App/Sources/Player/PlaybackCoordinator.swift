@@ -87,6 +87,7 @@ final class PlaybackCoordinator {
   @ObservationIgnored private var failedProfiles: Set<String> = []
   @ObservationIgnored private var playerFailureReasons: [PlaybackFailure.Reason] = []
   @ObservationIgnored private var fallbackTask: Task<Void, Never>?
+  @ObservationIgnored private var restoreFromPiPWhenActive = false
   @ObservationIgnored private var lastProgressSave: Date = .distantPast
   @ObservationIgnored private var lifecycleTokens: [any NSObjectProtocol] = []
 
@@ -261,6 +262,41 @@ final class PlaybackCoordinator {
   var currentChapter: Chapter? {
     guard let chapters = info?.chapters, !chapters.isEmpty else { return nil }
     return chapters.last { $0.startSeconds <= engine.position }
+  }
+
+  // MARK: SponsorBlock on the scrubber
+
+  /// Segments drawn on the scrubber: skip/mute ranges and highlights in enabled categories
+  /// (plus the Diagnostics test segment).
+  var scrubberSegments: [SponsorSegment] {
+    var segments = sponsorSegments
+    if settings.forceTestSponsorSegment { segments.append(Self.testSegment) }
+    let enabled = settings.activeSponsorCategories
+    return segments.filter { segment in
+      guard enabled.contains(segment.category) || segment == Self.testSegment else { return false }
+      return [.skip, .mute, .poi].contains(segment.action)
+    }
+  }
+
+  /// Segment under the playhead that is *not* auto-skipped (mute action, or skip undone this
+  /// session), offered as a manual "Skip" button.
+  var manuallySkippableSegment: SponsorSegment? {
+    let position = engine.position
+    let suppressed = Set(suppressedSegments.map(\.uuid))
+    return scrubberSegments.first { segment in
+      guard segment.action != .poi, segment.start <= position, position < segment.end - 1 else { return false }
+      let action = settings.sponsorCategoryActions[segment.category] ?? segment.action
+      return action == .mute || suppressed.contains(segment.uuid)
+    }
+  }
+
+  /// The video's highlight, while the playhead is still before it.
+  var upcomingHighlight: SponsorSegment? {
+    scrubberSegments.first { $0.action == .poi && engine.position < $0.start - 2 }
+  }
+
+  func skip(_ segment: SponsorSegment) {
+    engine.seek(to: segment.action == .poi ? segment.start : segment.end)
   }
 
   // MARK: Loading
@@ -544,8 +580,32 @@ final class PlaybackCoordinator {
       }
     })
     lifecycleTokens.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { @Sendable [weak self] _ in
-      MainActor.assumeIsolated { self?.engine.willEnterForeground() }
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        self.engine.willEnterForeground()
+        // Only returns from the background count; in-app PiP (Control Center etc.) is left alone.
+        self.restoreFromPiPWhenActive = self.engine.isPiPActive
+      }
     })
+    lifecycleTokens.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { @Sendable [weak self] _ in
+      MainActor.assumeIsolated {
+        guard let self, self.restoreFromPiPWhenActive else { return }
+        self.restoreFromPiPWhenActive = false
+        self.restoreFromPictureInPicture()
+      }
+    })
+  }
+
+  /// Returning to the app while PiP runs: bring the watch screen back in fullscreen, then stop
+  /// PiP so the window animates into the visible player layer.
+  private func restoreFromPictureInPicture() {
+    guard current != nil, engine.isPiPActive else { return }
+    isWatchPresented = true
+    isFullscreen = true
+    Task {
+      try? await Task.sleep(for: .milliseconds(350))
+      engine.stopPictureInPicture()
+    }
   }
 
   private func applyOrientation() {

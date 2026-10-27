@@ -44,11 +44,13 @@ extension View {
 struct GlassToast<Trailing: View>: View {
   let text: String
   var systemImage: String?
+  /// Tints the icon (SponsorBlock category colour).
+  var accent: Color?
   @ViewBuilder var trailing: Trailing
 
   var body: some View {
     HStack(spacing: 10) {
-      if let systemImage { Image(systemName: systemImage) }
+      if let systemImage { Image(systemName: systemImage).foregroundStyle(accent ?? .primary) }
       Text(text).font(.subheadline.weight(.medium)).lineLimit(2)
       trailing
     }
@@ -59,7 +61,7 @@ struct GlassToast<Trailing: View>: View {
 }
 
 extension GlassToast where Trailing == EmptyView {
-  init(text: String, systemImage: String? = nil) {
-    self.init(text: text, systemImage: systemImage) { EmptyView() }
+  init(text: String, systemImage: String? = nil, accent: Color? = nil) {
+    self.init(text: text, systemImage: systemImage, accent: accent) { EmptyView() }
   }
 }

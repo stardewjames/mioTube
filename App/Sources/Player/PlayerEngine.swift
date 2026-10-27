@@ -186,6 +186,8 @@ final class PlayerEngine {
 
   func togglePictureInPicture() { surface.togglePictureInPicture() }
 
+  func stopPictureInPicture() { surface.pipController?.stopPictureInPicture() }
+
   // MARK: Background
 
   func didEnterBackground(keepPlaying: Bool) {

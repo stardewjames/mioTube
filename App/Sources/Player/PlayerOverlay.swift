@@ -251,32 +251,33 @@ struct PlayerOverlay: View {
   }
 
   private var scrubber: some View {
-    let duration = max(engine.duration, 1)
     let shown = scrubbing ? scrubValue : engine.position
-    return VStack(spacing: coordinator.isFullscreen ? 6 : 0) {
-      ZStack {
-        Slider(
-          value: Binding(get: { shown }, set: { scrubValue = $0 }),
-          in: 0...duration,
-          onEditingChanged: { editing in
-            if editing {
-              scrubValue = engine.position
-              scrubbing = true
-            } else {
-              engine.seek(to: scrubValue, precise: true)
-              scrubbing = false
-            }
-            touch()
-          }
-        )
-        .tint(.red)
-        .controlSize(coordinator.isFullscreen ? .regular : .mini)
-        .disabled(coordinator.info?.isLive == true || engine.duration <= 0)
-        chapterTicks(duration: duration)
-      }
+    return VStack(spacing: coordinator.isFullscreen ? 6 : 2) {
+      sponsorActions
+      ScrubberBar(
+        duration: engine.duration,
+        position: shown,
+        segments: coordinator.scrubberSegments,
+        chapters: coordinator.info?.chapters ?? [],
+        isScrubbing: scrubbing,
+        isEnabled: coordinator.info?.isLive != true && engine.duration > 0,
+        height: coordinator.isFullscreen ? 5 : 4,
+        onScrub: { value in
+          scrubValue = value
+          scrubbing = true
+          touch()
+        },
+        onCommit: { value in
+          engine.seek(to: value, precise: true)
+          scrubbing = false
+          touch()
+        }
+      )
       HStack(spacing: 6) {
         Text(Format.duration(shown)).monospacedDigit()
-        if coordinator.fullVideoSponsored {
+        if scrubbing, let segment = coordinator.scrubberSegments.first(where: { $0.action != .poi && $0.start <= shown && shown < $0.end }) {
+          SponsorLabel(category: segment.category)
+        } else if coordinator.fullVideoSponsored {
           Label("Sponsored video", systemImage: "dollarsign.circle").labelStyle(.iconOnly).foregroundStyle(.yellow)
         }
         Spacer()
@@ -298,25 +299,42 @@ struct PlayerOverlay: View {
     }
   }
 
-  /// Chapter markers as tappable ticks on the scrubber track.
-  private func chapterTicks(duration: Double) -> some View {
-    GeometryReader { proxy in
-      ForEach(coordinator.info?.chapters.dropFirst() ?? [], id: \.startSeconds) { chapter in
-        let x = proxy.size.width * chapter.startSeconds / duration
-        Rectangle()
-          .fill(.white.opacity(0.9))
-          .frame(width: 2, height: coordinator.isFullscreen ? 8 : 6)
-          .padding(.horizontal, 6)
-          .contentShape(.rect)
-          .position(x: x, y: proxy.size.height / 2)
-          .onTapGesture {
-            engine.seek(to: chapter.startSeconds)
-            touch()
+  /// "Skip sponsor" for segments that are not auto-skipped (mute action or undone skip) and
+  /// "Highlight" to jump to the video's point of interest.
+  @ViewBuilder
+  private var sponsorActions: some View {
+    let skippable = coordinator.manuallySkippableSegment
+    let highlight = coordinator.upcomingHighlight
+    if skippable != nil || highlight != nil {
+      HStack(spacing: 8) {
+        Spacer()
+        if let highlight {
+          sponsorButton("Highlight", systemImage: "star.fill", category: highlight.category) { coordinator.skip(highlight) }
+        }
+        if let skippable {
+          sponsorButton("Skip \(skippable.category.displayName.lowercased())", systemImage: "forward.fill", category: skippable.category) {
+            coordinator.skip(skippable)
           }
-          .accessibilityLabel("Chapter: \(chapter.title)")
+        }
       }
+      .transition(.opacity)
     }
-    .frame(height: coordinator.isFullscreen ? 24 : 18)
+  }
+
+  private func sponsorButton(_ title: String, systemImage: String, category: SponsorCategory, action: @escaping () -> Void) -> some View {
+    Button {
+      action()
+      touch()
+    } label: {
+      HStack(spacing: 5) {
+        Circle().fill(category.color).frame(width: 7, height: 7)
+        Label(title, systemImage: systemImage)
+      }
+      .font((coordinator.isFullscreen ? Font.footnote : Font.caption2).weight(.semibold))
+      .padding(.horizontal, 10)
+      .padding(.vertical, coordinator.isFullscreen ? 7 : 5)
+    }
+    .glassControl()
   }
 
   @ViewBuilder
@@ -325,12 +343,12 @@ struct PlayerOverlay: View {
       Group {
         switch toast.kind {
         case .skipped:
-          GlassToast(text: "Skipped \(toast.segment.category.displayName.lowercased())", systemImage: "forward.fill") {
+          GlassToast(text: "Skipped \(toast.segment.category.displayName.lowercased())", systemImage: "forward.fill", accent: toast.segment.category.color) {
             Button("Undo") { coordinator.undoSkip() }
               .font(.subheadline.weight(.semibold))
           }
         case .muted:
-          GlassToast(text: "Muted \(toast.segment.category.displayName.lowercased())", systemImage: "speaker.slash.fill")
+          GlassToast(text: "Muted \(toast.segment.category.displayName.lowercased())", systemImage: "speaker.slash.fill", accent: toast.segment.category.color)
         }
       }
       .padding(.top, coordinator.isFullscreen ? 64 : 44)
@@ -391,5 +409,103 @@ struct CaptionOverlay: View {
         .allowsHitTesting(false)
         .transition(.opacity)
     }
+  }
+}
+
+/// Custom scrubber so SponsorBlock segments, highlights and chapter gaps line up exactly with
+/// the playhead (a system `Slider` insets its track by an unknown thumb margin).
+struct ScrubberBar: View {
+  let duration: Double
+  let position: Double
+  let segments: [SponsorSegment]
+  let chapters: [Chapter]
+  let isScrubbing: Bool
+  let isEnabled: Bool
+  let height: CGFloat
+  let onScrub: (Double) -> Void
+  let onCommit: (Double) -> Void
+
+  var body: some View {
+    GeometryReader { proxy in
+      let width = max(proxy.size.width, 1)
+      let bar = isScrubbing ? height * 1.8 : height
+      let thumb: CGFloat = isScrubbing ? 16 : 12
+      let x: (Double) -> CGFloat = { seconds in
+        duration > 0 ? width * CGFloat(min(max(seconds / duration, 0), 1)) : 0
+      }
+      ZStack(alignment: .leading) {
+        ZStack(alignment: .leading) {
+          Rectangle().fill(.white.opacity(0.3))
+          Rectangle().fill(Color.red).frame(width: x(position))
+          ForEach(segments.filter { $0.action != .poi }, id: \.uuid) { segment in
+            Rectangle()
+              .fill(segment.category.color.opacity(0.9))
+              .frame(width: max(2, x(segment.end) - x(segment.start)))
+              .offset(x: x(segment.start))
+          }
+          ForEach(chapters.dropFirst(), id: \.startSeconds) { chapter in
+            Rectangle()
+              .fill(.black.opacity(0.7))
+              .frame(width: 2)
+              .offset(x: x(chapter.startSeconds) - 1)
+          }
+        }
+        .frame(height: bar)
+        .clipShape(.capsule)
+
+        ForEach(segments.filter { $0.action == .poi }, id: \.uuid) { highlight in
+          RoundedRectangle(cornerRadius: 1.5)
+            .fill(highlight.category.color)
+            .frame(width: 3, height: bar + 6)
+            .offset(x: x(highlight.start) - 1.5)
+        }
+
+        Circle()
+          .fill(.white)
+          .frame(width: thumb, height: thumb)
+          .shadow(color: .black.opacity(0.4), radius: 2)
+          .offset(x: x(position) - thumb / 2)
+          .opacity(isEnabled ? 1 : 0)
+      }
+      .frame(width: width, height: proxy.size.height)
+      .contentShape(.rect)
+      .gesture(
+        DragGesture(minimumDistance: 0)
+          .onChanged { value in onScrub(seconds(at: value.location.x, width: width)) }
+          .onEnded { value in onCommit(seconds(at: value.location.x, width: width)) }
+      )
+      .allowsHitTesting(isEnabled)
+    }
+    .frame(height: 24)
+    .animation(.easeOut(duration: 0.15), value: isScrubbing)
+    .accessibilityElement()
+    .accessibilityLabel("Playback position")
+    .accessibilityValue(Format.duration(position))
+    .accessibilityAdjustableAction { direction in
+      switch direction {
+      case .increment: onCommit(min(position + 10, duration))
+      case .decrement: onCommit(max(position - 10, 0))
+      @unknown default: break
+      }
+    }
+  }
+
+  private func seconds(at x: CGFloat, width: CGFloat) -> Double {
+    duration * Double(min(max(x / width, 0), 1))
+  }
+}
+
+/// Coloured category tag (e.g. while scrubbing through a segment).
+struct SponsorLabel: View {
+  let category: SponsorCategory
+
+  var body: some View {
+    HStack(spacing: 4) {
+      Circle().fill(category.color).frame(width: 6, height: 6)
+      Text(category.displayName)
+    }
+    .padding(.horizontal, 6)
+    .padding(.vertical, 2)
+    .background(.black.opacity(0.45), in: .capsule)
   }
 }
