@@ -296,7 +296,7 @@ final class PlaybackCoordinator {
   }
 
   func skip(_ segment: SponsorSegment) {
-    engine.seek(to: segment.action == .poi ? segment.start : segment.end)
+    if segment.action == .poi { engine.seek(to: segment.start) } else { engine.seekPast(segment.end) }
   }
 
   // MARK: Loading
@@ -467,7 +467,7 @@ final class PlaybackCoordinator {
       skipEngine = engineState
       switch decision {
       case .skip(let target, let segment):
-        engine.seek(to: target)
+        engine.seekPast(target)
         show(SponsorToast(segment: segment, kind: .skipped(from: position)))
       case .mute(let muted, let segment):
         engine.setMuted(muted)

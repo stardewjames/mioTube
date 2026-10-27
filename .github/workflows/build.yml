@@ -53,4 +53,7 @@ jobs:
             ${{ runner.temp }}/MioTube-*-unsigned.ipa
             ${{ runner.temp }}/MioTube-*-dSYMs.zip
           generate_release_notes: true
+          # Tags with a suffix (v1.1.0-pre.3) are test builds: published as pre-releases so
+          # they never show up as the "Latest" release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true

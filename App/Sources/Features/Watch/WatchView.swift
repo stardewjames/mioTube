@@ -32,7 +32,8 @@ struct WatchView: View {
     .ignoresSafeArea(edges: coordinator.isFullscreen ? .all : [])
     .statusBarHidden(coordinator.isFullscreen)
     .persistentSystemOverlays(coordinator.isFullscreen ? .hidden : .automatic)
-    .interactiveDismissDisabled(coordinator.isFullscreen)
+    // Also disables the zoom transition's drag-to-dismiss; the player handles vertical swipes.
+    .interactiveDismissDisabled()
     .modifier(ZoomDestination(id: coordinator.current?.video.videoID, namespace: namespace))
     .onAppear { coordinator.watchScreenDidAppear() }
     .sheet(item: $coordinator.failure) { failure in

@@ -48,12 +48,12 @@ struct RootView: View {
     .tabBarMinimizeBehavior(.onScrollDown)
     .modifier(MiniPlayerAccessory(isEnabled: coordinator.current != nil))
     .environment(\.zoomNamespace, zoomNamespace)
-    .sheet(isPresented: $coordinator.isWatchPresented) {
+    // A full-screen cover has no system pan-to-dismiss recognizer, so vertical swipes on the
+    // video reach the player (up = fullscreen, down = minimize / leave fullscreen).
+    .fullScreenCover(isPresented: $coordinator.isWatchPresented) {
       WatchView()
         .environment(env)
         .environment(\.zoomNamespace, zoomNamespace)
-        .presentationDetents([.large])
-        .presentationDragIndicator(coordinator.isFullscreen ? .hidden : .visible)
     }
     .sheet(isPresented: $account.isPresentingSignIn) {
       SignInSheet().environment(env)

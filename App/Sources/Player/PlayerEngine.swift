@@ -55,6 +55,8 @@ final class PlayerEngine {
   @ObservationIgnored private var audioSessionActive = false
   @ObservationIgnored private var hosts = NSHashTable<PlayerHostView>.weakObjects()
   @ObservationIgnored private var qualityCap: QualityCap = .auto
+  @ObservationIgnored private var seekGeneration = 0
+  @ObservationIgnored private(set) var isSeeking = false
   @ObservationIgnored private var loadWatchdog: Task<Void, Never>?
   /// A stream that is not ready by then is treated as failed so another profile can be tried.
   static let loadTimeout: Duration = .seconds(15)
@@ -124,6 +126,9 @@ final class PlayerEngine {
   private func tearDownItem() {
     loadWatchdog?.cancel()
     loadWatchdog = nil
+    // A new or cleared item invalidates any in-flight seek.
+    seekGeneration += 1
+    isSeeking = false
     itemObservations.forEach { $0.invalidate() }
     itemObservations = []
     itemNotificationTokens.forEach { NotificationCenter.default.removeObserver($0) }
@@ -150,12 +155,32 @@ final class PlayerEngine {
   }
 
   func seek(to seconds: Double, precise: Bool = true) {
+    let tolerance: CMTime = precise ? .zero : .positiveInfinity
+    seek(to: seconds, toleranceBefore: tolerance, toleranceAfter: tolerance)
+  }
+
+  /// Jumps past a SponsorBlock segment: never lands before `seconds` (which would re-enter the
+  /// segment) but may snap up to 1 s later to the next keyframe, so long skips are fast.
+  func seekPast(_ seconds: Double) {
+    seek(to: seconds, toleranceBefore: .zero, toleranceAfter: CMTime(seconds: 1, preferredTimescale: 600))
+  }
+
+  /// While a seek is in flight the periodic observer still reports the *old* time; those
+  /// ticks are dropped so SponsorBlock doesn't re-trigger the same skip (a seek storm that
+  /// stalls playback on long segments). Only the latest seek's completion ends the window.
+  private func seek(to seconds: Double, toleranceBefore: CMTime, toleranceAfter: CMTime) {
     let clamped = max(0, duration > 0 ? min(seconds, duration - 0.25) : seconds)
     position = clamped
+    seekGeneration += 1
+    let generation = seekGeneration
+    isSeeking = true
     let time = CMTime(seconds: clamped, preferredTimescale: 600)
-    let tolerance: CMTime = precise ? .zero : .positiveInfinity
-    player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { @Sendable [weak self] _ in
-      Task { @MainActor in self?.onStateChange?() }
+    player.seek(to: time, toleranceBefore: toleranceBefore, toleranceAfter: toleranceAfter) { @Sendable [weak self] _ in
+      Task { @MainActor in
+        guard let self, generation == self.seekGeneration else { return }
+        self.isSeeking = false
+        self.onStateChange?()
+      }
     }
   }
 
@@ -227,7 +252,7 @@ final class PlayerEngine {
   }
 
   private func tick(_ seconds: Double) {
-    guard seconds.isFinite else { return }
+    guard seconds.isFinite, !isSeeking else { return }
     position = seconds
     if let item = player.currentItem {
       let total = item.duration.seconds

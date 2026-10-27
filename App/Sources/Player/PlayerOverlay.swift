@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Glass controls over the video surface: scrubber with chapter ticks, transport, speed,
 /// quality, captions, PiP, fullscreen. Auto-hides after 3 s of no touch while playing.
-/// Swipe up enters fullscreen, swipe down leaves it.
+/// Swipe up enters fullscreen; swipe down leaves it, or minimizes the player when inline.
 struct PlayerOverlay: View {
   @Environment(AppEnvironment.self) private var env
   @Environment(\.dismiss) private var dismiss
@@ -367,16 +367,20 @@ struct PlayerOverlay: View {
     touch()
   }
 
-  /// Vertical swipe: up enters fullscreen, down leaves it. Inline swipe-down stays with the
-  /// sheet (it minimizes the player).
+  /// Vertical swipe on the video: up enters fullscreen; down leaves fullscreen, or minimizes
+  /// the player when inline. Short flicks count via the predicted end translation.
   private func swipe(_ value: DragGesture.Value) {
     let dy = value.translation.height
-    guard abs(dy) > 50, abs(dy) > abs(value.translation.width) * 1.5 else { return }
-    if dy < 0, !coordinator.isFullscreen {
-      coordinator.isFullscreen = true
-    } else if dy > 0, coordinator.isFullscreen {
+    let predicted = value.predictedEndTranslation.height
+    guard abs(dy) > abs(value.translation.width) * 1.5, abs(dy) > 40 || abs(predicted) > 120 else { return }
+    if dy < 0 {
+      if !coordinator.isFullscreen { coordinator.isFullscreen = true }
+    } else if coordinator.isFullscreen {
       coordinator.isFullscreen = false
+    } else {
+      dismiss()
     }
+    touch()
   }
 
   private func doubleTap(forward: Bool) {
