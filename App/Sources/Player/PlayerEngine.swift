@@ -4,7 +4,9 @@ import MioTubeCore
 import Observation
 import UIKit
 
-/// Owns the one `AVPlayer`, its KVO/notification plumbing and the audio session.
+/// Owns the active `AVPlayer`, its KVO/notification plumbing and the audio session. A second,
+/// muted "standby" player can pre-buffer the landing point of an upcoming SponsorBlock skip;
+/// the skip then swaps players instead of seeking.
 @Observable
 final class PlayerEngine {
   nonisolated enum Status: Equatable {
@@ -14,7 +16,7 @@ final class PlayerEngine {
     case failed(String)
   }
 
-  @ObservationIgnored let player = AVPlayer()
+  @ObservationIgnored private(set) var player = AVPlayer()
   @ObservationIgnored let surface = PlayerSurfaceView()
 
   private(set) var status: Status = .idle
@@ -61,13 +63,27 @@ final class PlayerEngine {
   /// A stream that is not ready by then is treated as failed so another profile can be tried.
   static let loadTimeout: Duration = .seconds(15)
 
+  /// Muted player parked at a skip's landing point.
+  private struct Standby {
+    let player: AVPlayer
+    let item: AVPlayerItem
+    let target: Double
+    let observation: NSKeyValueObservation
+    var seekIssued = false
+    var isPositioned = false
+  }
+
+  @ObservationIgnored private var standby: Standby?
+  @ObservationIgnored private var standbyID: UUID?
+  @ObservationIgnored private var currentAsset: AVURLAsset?
+  @ObservationIgnored private var forwardBufferLimit: Double?
+
   init() {
     surface.engine = self
     surface.attach(player)
-    player.automaticallyWaitsToMinimizeStalling = true
-    player.allowsExternalPlayback = true
+    Self.configure(player)
     surface.onPiPActiveChange = { [weak self] active in self?.isPiPActive = active }
-    observePlayer()
+    bind(player)
     observeAudioSession()
   }
 
@@ -84,6 +100,8 @@ final class PlayerEngine {
 
   func load(_ source: PlaybackSource, startAt: Double, autoplay: Bool = true, quality: QualityCap, pipAutoStart: Bool) {
     tearDownItem()
+    discardStandby()
+    forwardBufferLimit = nil
     guard let url = source.url else {
       if case .unavailable(let failure) = source {
         status = .failed(failure.reasons.last?.reason ?? "Playback unavailable")
@@ -97,7 +115,9 @@ final class PlayerEngine {
     duration = 0
     pendingStart = startAt
     pendingAutoplay = autoplay
-    let item = AVPlayerItem(asset: AVURLAsset(url: url))
+    let asset = AVURLAsset(url: url)
+    currentAsset = asset
+    let item = AVPlayerItem(asset: asset)
     item.audioTimePitchAlgorithm = .timeDomain
     qualityCap = quality
     applyQuality(to: item)
@@ -115,6 +135,8 @@ final class PlayerEngine {
 
   func stop() {
     tearDownItem()
+    discardStandby()
+    currentAsset = nil
     player.replaceCurrentItem(with: nil)
     surface.tearDownPictureInPicture()
     status = .idle
@@ -184,6 +206,101 @@ final class PlayerEngine {
     }
   }
 
+  // MARK: SponsorBlock buffering
+
+  /// Caps how far ahead the active item buffers so it doesn't download a segment that is
+  /// about to be skipped. `nil` restores automatic buffering. Applied in whole seconds to
+  /// avoid re-setting the item on every tick.
+  func limitForwardBuffer(_ seconds: Double?) {
+    let rounded = seconds.map { max(2, $0.rounded(.up)) }
+    guard rounded != forwardBufferLimit else { return }
+    forwardBufferLimit = rounded
+    player.currentItem?.preferredForwardBufferDuration = rounded ?? 0
+  }
+
+  /// Starts buffering `target` (a skip's landing point) in a muted standby player.
+  func prepareStandby(at target: Double) {
+    guard let asset = currentAsset, status == .ready, canSwapPlayers else { return }
+    if let standby, abs(standby.target - target) < 0.5 { return }
+    discardStandby()
+    let item = AVPlayerItem(asset: asset)
+    item.audioTimePitchAlgorithm = .timeDomain
+    item.preferredForwardBufferDuration = 8
+    applyQuality(to: item)
+    let standbyPlayer = AVPlayer(playerItem: item)
+    Self.configure(standbyPlayer)
+    standbyPlayer.isMuted = true
+    let id = UUID()
+    let observation = item.observe(\.status, options: [.initial, .new]) { @Sendable [weak self] item, _ in
+      guard item.status == .readyToPlay else { return }
+      Task { @MainActor in self?.positionStandby(id) }
+    }
+    standby = Standby(player: standbyPlayer, item: item, target: target, observation: observation)
+    standbyID = id
+  }
+
+  /// Skip over a segment ending at `target`: swap to the pre-buffered standby player when it
+  /// is parked there, otherwise seek.
+  func jumpOverSegment(to target: Double) {
+    limitForwardBuffer(nil)
+    guard let ready = standby, ready.isPositioned, abs(ready.target - target) < 1, canSwapPlayers else {
+      discardStandby()
+      seekPast(target)
+      return
+    }
+    ready.observation.invalidate()
+    standby = nil
+    standbyID = nil
+    swap(to: ready.player, item: ready.item)
+  }
+
+  /// Swapping the layer's player while in PiP or AirPlay would interrupt them; seek instead.
+  private var canSwapPlayers: Bool { !isPiPActive && !player.isExternalPlaybackActive }
+
+  private func positionStandby(_ id: UUID) {
+    guard standbyID == id, var parked = standby, !parked.seekIssued else { return }
+    parked.seekIssued = true
+    standby = parked
+    let time = CMTime(seconds: parked.target, preferredTimescale: 600)
+    parked.player.seek(to: time, toleranceBefore: .zero, toleranceAfter: CMTime(seconds: 1, preferredTimescale: 600)) { @Sendable [weak self] finished in
+      Task { @MainActor in
+        guard finished, let self, self.standbyID == id else { return }
+        self.standby?.isPositioned = true
+      }
+    }
+  }
+
+  private func discardStandby() {
+    guard let parked = standby else { return }
+    parked.observation.invalidate()
+    parked.player.pause()
+    parked.player.replaceCurrentItem(with: nil)
+    standby = nil
+    standbyID = nil
+  }
+
+  private func swap(to newPlayer: AVPlayer, item: AVPlayerItem) {
+    let old = player
+    let wasPlaying = isPlaying
+    unbind(old)
+    tearDownItem()
+    old.pause()
+    item.preferredForwardBufferDuration = 0
+    newPlayer.isMuted = isMuted
+    newPlayer.defaultRate = rate
+    player = newPlayer
+    forwardBufferLimit = nil
+    bind(newPlayer)
+    observe(item)
+    // Keep the background "detached" state if the layer is currently detached.
+    if surface.playerLayer.player != nil { surface.attach(newPlayer) }
+    let landed = item.currentTime().seconds
+    if landed.isFinite { position = landed }
+    if wasPlaying { newPlayer.playImmediately(atRate: rate) }
+    old.replaceCurrentItem(with: nil)
+    onStateChange?()
+  }
+
   func skip(by delta: Double) {
     seek(to: position + delta, precise: false)
   }
@@ -231,15 +348,27 @@ final class PlayerEngine {
 
   // MARK: Observation
 
-  private func observePlayer() {
-    playerObservations.append(player.observe(\.timeControlStatus, options: [.initial, .new]) { @Sendable [weak self] player, _ in
+  private static func configure(_ player: AVPlayer) {
+    player.automaticallyWaitsToMinimizeStalling = true
+    player.allowsExternalPlayback = true
+  }
+
+  private func bind(_ player: AVPlayer) {
+    playerObservations = [player.observe(\.timeControlStatus, options: [.initial, .new]) { @Sendable [weak self] player, _ in
       let status = player.timeControlStatus
       Task { @MainActor in self?.apply(status) }
-    })
+    }]
     timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 4), queue: .main) { @Sendable [weak self] time in
       let seconds = time.seconds
       MainActor.assumeIsolated { self?.tick(seconds) }
     }
+  }
+
+  private func unbind(_ player: AVPlayer) {
+    playerObservations.forEach { $0.invalidate() }
+    playerObservations = []
+    if let timeObserver { player.removeTimeObserver(timeObserver) }
+    timeObserver = nil
   }
 
   private func apply(_ status: AVPlayer.TimeControlStatus) {

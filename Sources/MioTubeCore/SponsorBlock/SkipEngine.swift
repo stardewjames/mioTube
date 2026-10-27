@@ -52,13 +52,7 @@ public struct SkipEngine: Sendable {
   public mutating func evaluate(position: Double, muted: Bool) -> SkipDecision {
     // Skips first: chain through back-to-back segments so one seek clears them all.
     if let first = active(at: position + tiltThreshold, limit: position, action: .skip) {
-      var target = first.end
-      var guardCount = 0
-      while let next = active(at: target + tiltThreshold, limit: target, action: .skip), next.end > target, guardCount < 32 {
-        target = next.end
-        guardCount += 1
-      }
-      return .skip(to: target, segment: first)
+      return .skip(to: chainedEnd(from: first), segment: first)
     }
 
     let muteSegment = active(at: position, limit: position, action: .mute)
@@ -76,6 +70,32 @@ public struct SkipEngine: Sendable {
       return .mute(false, segment: nil)
     }
     return .none
+  }
+
+  /// The next auto-skip segment starting after `position` and where playback will land
+  /// (back-to-back segments chained), so the player can stop buffering into it and pre-load
+  /// the landing point.
+  public func upcomingSkip(after position: Double) -> (segment: SponsorSegment, target: Double)? {
+    var low = 0
+    var high = segments.count
+    while low < high {
+      let mid = (low + high) / 2
+      if segments[mid].start <= position + tiltThreshold { low = mid + 1 } else { high = mid }
+    }
+    for segment in segments[low...] where actions[segment.uuid] == .skip && !suppressed.contains(segment.uuid) {
+      return (segment, chainedEnd(from: segment))
+    }
+    return nil
+  }
+
+  private func chainedEnd(from first: SponsorSegment) -> Double {
+    var target = first.end
+    var guardCount = 0
+    while let next = active(at: target + tiltThreshold, limit: target, action: .skip), next.end > target, guardCount < 32 {
+      target = next.end
+      guardCount += 1
+    }
+    return target
   }
 
   /// The user changed mute themselves: stop managing it until the segment changes.

@@ -81,6 +81,21 @@ private func segment(
     #expect(engine.evaluate(position: 10, muted: false) == .none)
   }
 
+  @Test func upcomingSkipChainsAndIgnoresMuteAndSuppressed() {
+    let mute = segment(20, 30, .musicOfftopic, .mute)
+    let a = segment(40, 60)
+    let b = segment(60, 90, .selfpromo)
+    let later = segment(200, 230, id: "later")
+    var engine = SkipEngine(segments: [later, b, mute, a], enabled: all)
+    let next = engine.upcomingSkip(after: 10)
+    #expect(next?.segment == a)
+    #expect(next?.target == 90)
+    // Once inside/after a, the lookahead moves on; b is part of a's chain but still a segment.
+    #expect(engine.upcomingSkip(after: 100)?.segment == later)
+    engine.suppress(later)
+    #expect(engine.upcomingSkip(after: 100) == nil)
+  }
+
   @Test func longEarlierSegmentStillFoundBehindShortOnes() {
     let long = segment(0, 100, id: "long")
     let short = segment(5, 6, .selfpromo, id: "short")

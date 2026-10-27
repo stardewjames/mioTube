@@ -303,7 +303,7 @@ final class PlaybackCoordinator {
   }
 
   func skip(_ segment: SponsorSegment) {
-    if segment.action == .poi { engine.seek(to: segment.start) } else { engine.seekPast(segment.end) }
+    if segment.action == .poi { engine.seek(to: segment.start) } else { engine.jumpOverSegment(to: segment.end) }
   }
 
   // MARK: Loading
@@ -474,7 +474,7 @@ final class PlaybackCoordinator {
       skipEngine = engineState
       switch decision {
       case .skip(let target, let segment):
-        engine.seekPast(target)
+        engine.jumpOverSegment(to: target)
         show(SponsorToast(segment: segment, kind: .skipped(from: position)))
       case .mute(let muted, let segment):
         engine.setMuted(muted)
@@ -486,12 +486,31 @@ final class PlaybackCoordinator {
       case .none:
         break
       }
+      if case .skip = decision {} else { prepareForUpcomingSkip(at: position, using: engineState) }
+    } else {
+      engine.limitForwardBuffer(nil)
     }
     if let captions {
       let text = captions.cue(at: position)?.text
       if text != currentCaption { currentCaption = text }
     }
     saveProgress(force: false)
+  }
+
+  /// Within 30 s of an auto-skip, cap forward buffering at the segment start so the skipped
+  /// part isn't downloaded; within 20 s of a segment of 6 s or more, start pre-buffering its
+  /// landing point in the standby player so the skip resumes instantly.
+  private func prepareForUpcomingSkip(at position: Double, using skips: SkipEngine) {
+    guard let upcoming = skips.upcomingSkip(after: position) else {
+      engine.limitForwardBuffer(nil)
+      return
+    }
+    let lead = upcoming.segment.start - position
+    engine.limitForwardBuffer(lead < 30 ? lead + 1 : nil)
+    let landsBeforeEnd = engine.duration <= 0 || upcoming.target < engine.duration - 2
+    if lead < 20, upcoming.target - upcoming.segment.start >= 6, landsBeforeEnd {
+      engine.prepareStandby(at: upcoming.target)
+    }
   }
 
   private func show(_ toast: SponsorToast) {
