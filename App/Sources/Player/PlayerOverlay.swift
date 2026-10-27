@@ -185,12 +185,18 @@ struct PlayerOverlay: View {
 
   private var transport: some View {
     GlassEffectContainer(spacing: 24) {
-      HStack(spacing: 28) {
+      HStack(spacing: coordinator.isFullscreen ? 28 : 14) {
         Button { coordinator.previous(); touch() } label: {
           Image(systemName: "backward.end.fill").font(.title3).frame(width: 48, height: 48)
         }
         .glassControl()
         .accessibilityLabel("Previous")
+
+        Button { engine.skip(by: -10); touch() } label: {
+          Image(systemName: "gobackward.10").font(.title3).frame(width: 44, height: 44)
+        }
+        .glassControl()
+        .accessibilityLabel("Back 10 seconds")
 
         Button { engine.togglePlayPause(); touch() } label: {
           Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
@@ -200,6 +206,12 @@ struct PlayerOverlay: View {
         }
         .glassControl()
         .accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
+
+        Button { engine.skip(by: 10); touch() } label: {
+          Image(systemName: "goforward.10").font(.title3).frame(width: 44, height: 44)
+        }
+        .glassControl()
+        .accessibilityLabel("Forward 10 seconds")
 
         Button { coordinator.advance(.user); touch() } label: {
           Image(systemName: "forward.end.fill").font(.title3).frame(width: 48, height: 48)
