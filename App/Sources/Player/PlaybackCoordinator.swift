@@ -87,6 +87,7 @@ final class PlaybackCoordinator {
   @ObservationIgnored private var suppressedSegments: [SponsorSegment] = []
   @ObservationIgnored private var captions: Captions?
   @ObservationIgnored private var pendingPiPRestore: ((Bool) -> Void)?
+  @ObservationIgnored private var lastSkip: (uuid: String, at: Date)?
   /// Profiles whose stream failed in AVPlayer for the current video, with the reasons.
   @ObservationIgnored private var failedProfiles: Set<String> = []
   @ObservationIgnored private var playerFailureReasons: [PlaybackFailure.Reason] = []
@@ -328,6 +329,7 @@ final class PlaybackCoordinator {
     fallbackTask?.cancel()
     failedProfiles = []
     playerFailureReasons = []
+    lastSkip = nil
   }
 
   /// A resolved stream would not play (e.g. it needs a JS transform or PO token): re-resolve
@@ -474,8 +476,26 @@ final class PlaybackCoordinator {
       skipEngine = engineState
       switch decision {
       case .skip(let target, let segment):
-        engine.jumpOverSegment(to: target)
+        if let last = lastSkip, last.uuid == segment.uuid, Date().timeIntervalSince(last.at) < 2 {
+          // Same segment again right after jumping over it: the jump didn't land. Stop
+          // re-seeking (that loop shows one frame over and over) and let it play.
+          engineState.suppress(segment)
+          skipEngine = engineState
+          suppressedSegments.append(segment)
+          break
+        }
+        lastSkip = (segment.uuid, Date())
         show(SponsorToast(segment: segment, kind: .skipped(from: position)))
+        if engine.duration > 0, target >= engine.duration - 1 {
+          // Segment runs to the end (outro/endcards): seeking would clamp just short of the
+          // end and re-trigger forever. Jump to the end so the normal end-of-video path runs.
+          engineState.suppress(segment)
+          skipEngine = engineState
+          suppressedSegments.append(segment)
+          engine.seek(to: engine.duration)
+        } else {
+          engine.jumpOverSegment(to: target)
+        }
       case .mute(let muted, let segment):
         engine.setMuted(muted)
         if muted, let segment {

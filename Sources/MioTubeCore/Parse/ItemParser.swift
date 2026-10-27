@@ -10,6 +10,30 @@ enum ItemParser {
     "compactPlaylistRenderer", "channelRenderer", "gridChannelRenderer",
   ]
 
+  enum Outcome {
+    case item(FeedItem)
+    /// An item (or storefront renderer) that is streaming-service content; not shown, counted.
+    case excluded
+    case notItem
+  }
+
+  /// `parse` plus the streaming-service filter.
+  static func parseFiltered(_ key: String, _ value: JSONValue) -> Outcome {
+    if StreamingContentFilter.renderers.contains(key) { return .excluded }
+    guard itemKeys.contains(key) else { return .notItem }
+    if StreamingContentFilter.isServiceContent(value) { return .excluded }
+    guard let item = parse(key, value) else {
+      // Lockups of storefront types (movies, shows) parse to nil on purpose.
+      return key == "lockupViewModel" && value["contentId"] != nil ? .excluded : .notItem
+    }
+    let owner = switch item {
+    case .video(let video): video.channelName
+    case .playlist(let playlist): playlist.author
+    case .channel(let channel): channel.title
+    }
+    return StreamingContentFilter.isServiceOwner(owner) ? .excluded : .item(item)
+  }
+
   static func parse(_ key: String, _ value: JSONValue) -> FeedItem? {
     guard itemKeys.contains(key) else { return nil }
     switch key {
@@ -117,7 +141,7 @@ enum ItemParser {
         channelID: id, title: title, thumbnailURL: thumbnail, subscriberText: meta.subscribers,
         handle: meta.handle ?? ""
       ))
-    default:
+    case "LOCKUP_CONTENT_TYPE_VIDEO", nil:
       var duration: Int?
       var live = false
       var upcoming = false
@@ -139,6 +163,9 @@ enum ItemParser {
         thumbnailURL: thumbnail, durationSeconds: live ? nil : duration, viewCountText: meta.views,
         publishedText: meta.published, isLive: live, isUpcoming: upcoming
       ))
+    default:
+      // Movies, shows and other storefront lockup types are not playable videos.
+      return nil
     }
   }
 

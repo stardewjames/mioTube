@@ -21,6 +21,23 @@ import Testing
     #expect(json == original)
   }
 
+  @Test func streamingServiceContentIsRemoved() throws {
+    let page = FeedParser.parse(try Fixture.json("streaming_synthetic.json"))
+    // Kept: the fundraiser (YPC style but a donation), a video titled "Buy", an ordinary lockup.
+    #expect(page.videos.map(\.videoID) == ["FUNDRAISER01", "PLAINVIDEO01", "NORMALLOCK01"])
+    // Removed: Free-with-ads badge, storefront owner, Sunday Ticket live event, movie lockup,
+    // the "Free with ads movies" shelf, movieRenderer.
+    #expect(page.droppedAds == 6)
+    #expect(page.sections.allSatisfy { $0.title == nil })
+  }
+
+  @Test func streamingFilterLeavesRealFixturesAlone() throws {
+    for name in ["channel_videos.json", "browse_shelves.json", "search.json", "playlist.json"] {
+      let page = FeedParser.parse(try Fixture.json(name))
+      #expect(page.droppedAds == 0, "\(name)")
+    }
+  }
+
   @Test func parserReportsDroppedAds() throws {
     let page = FeedParser.parse(try Fixture.json("ads_synthetic.json"))
     #expect(page.droppedAds == 5)

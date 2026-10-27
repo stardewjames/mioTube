@@ -1,0 +1,33 @@
+{
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [{
+        "tabRenderer": {
+          "selected": true,
+          "content": {
+            "richGridRenderer": {
+              "contents": [
+                {"richItemRenderer": {"content": {"videoRenderer": {"videoId": "MOVIEFREEADS", "title": {"runs": [{"text": "Happy Gilmore"}]}, "badges": [{"metadataBadgeRenderer": {"style": "BADGE_STYLE_TYPE_YPC", "label": "Free with ads"}}]}}}},
+                {"richItemRenderer": {"content": {"videoRenderer": {"videoId": "FUNDRAISER01", "title": {"runs": [{"text": "PBS NewsHour live"}]}, "badges": [{"metadataBadgeRenderer": {"style": "BADGE_STYLE_TYPE_YPC", "label": "Fundraiser"}}]}}}},
+                {"richItemRenderer": {"content": {"videoRenderer": {"videoId": "PLAINVIDEO01", "title": {"runs": [{"text": "Buy"}]}, "ownerText": {"runs": [{"text": "Some Band"}]}}}}},
+                {"richItemRenderer": {"content": {"videoRenderer": {"videoId": "STOREFRONT01", "title": {"runs": [{"text": "Trailer"}]}, "ownerText": {"runs": [{"text": "YouTube Movies & TV"}]}}}}},
+                {"richItemRenderer": {"content": {"lockupViewModel": {"contentId": "LIVEEVENT001", "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                  "contentImage": {"thumbnailViewModel": {"image": {"sources": [{"url": "https://i.ytimg.com/a.jpg", "width": 320}]}, "overlays": [{"thumbnailBottomOverlayViewModel": {"badges": [{"thumbnailBadgeViewModel": {"text": "LIVE", "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE"}}]}}]}},
+                  "metadata": {"lockupMetadataViewModel": {"title": {"content": "Lions vs Packers"}, "metadata": {"contentMetadataViewModel": {"metadataRows": [{"metadataParts": [{"text": {"content": "NFL Sunday Ticket"}}, {"text": {"content": "Included with NFL Sunday Ticket"}}]}]}}}}}}}},
+                {"richItemRenderer": {"content": {"lockupViewModel": {"contentId": "MOVIELOCKUP1", "contentType": "LOCKUP_CONTENT_TYPE_MOVIE",
+                  "metadata": {"lockupMetadataViewModel": {"title": {"content": "Heat"}}}}}}},
+                {"richItemRenderer": {"content": {"lockupViewModel": {"contentId": "NORMALLOCK01", "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                  "contentImage": {"thumbnailViewModel": {"image": {"sources": [{"url": "https://i.ytimg.com/b.jpg", "width": 320}]}}},
+                  "metadata": {"lockupMetadataViewModel": {"title": {"content": "How to rent an apartment"}, "metadata": {"contentMetadataViewModel": {"metadataRows": [{"metadataParts": [{"text": {"content": "Creator"}}]}, {"metadataParts": [{"text": {"content": "1.2K views"}}]}]}}}}}}}},
+                {"richSectionRenderer": {"content": {"richShelfRenderer": {"title": {"runs": [{"text": "Free with ads movies"}]}, "contents": [
+                  {"richItemRenderer": {"content": {"videoRenderer": {"videoId": "SHELFMOVIE01", "title": {"runs": [{"text": "Riddick"}]}}}}}
+                ]}}}},
+                {"richItemRenderer": {"content": {"movieRenderer": {"videoId": "MOVIERENDER1", "title": {"runs": [{"text": "Mean Girls"}]}}}}}
+              ]
+            }
+          }
+        }
+      }]
+    }
+  }
+}

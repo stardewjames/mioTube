@@ -59,7 +59,7 @@ public enum CaptionsParser {
   public static func parse(_ vtt: String) -> Captions {
     let normalized = vtt.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
     let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false)
-    var cues: [Cue] = []
+    var cues: [RawCue] = []
     var index = 0
     while index < lines.count {
       let line = lines[index]
@@ -69,14 +69,41 @@ public enum CaptionsParser {
       }
       index += 1
       var textLines: [String] = []
-      while index < lines.count, !lines[index].trimmingCharacters(in: .whitespaces).isEmpty {
+      // A cue payload ends at an *empty* line; whitespace-only lines (" ") are payload, as in
+      // YouTube's auto-generated tracks.
+      while index < lines.count, !lines[index].isEmpty {
         textLines.append(clean(String(lines[index])))
         index += 1
       }
-      let text = textLines.filter { !$0.isEmpty }.joined(separator: "\n")
-      if !text.isEmpty { cues.append(Cue(start: timing.0, end: timing.1, text: text)) }
+      let payload = textLines.filter { !$0.isEmpty }
+      if !payload.isEmpty { cues.append(RawCue(start: timing.0, end: timing.1, lines: payload)) }
     }
-    return Captions(cues: cues)
+    return Captions(cues: collapseRollingCues(cues))
+  }
+
+  struct RawCue {
+    let start: Double
+    let end: Double
+    let lines: [String]
+  }
+
+  /// YouTube's auto-generated VTT "rolls": every cue repeats the previous cue's line above the
+  /// new one, and 10 ms filler cues re-show the finished line. Rendered as-is the text appears
+  /// twice. Drop the filler cues and the lines carried over from the previous cue.
+  static func collapseRollingCues(_ raw: [RawCue]) -> [Cue] {
+    var result: [Cue] = []
+    var previous: [String] = []
+    var previousEnd = -Double.infinity
+    for cue in raw.sorted(by: { $0.start < $1.start }) {
+      if cue.end - cue.start < 0.05 { continue }
+      let adjacent = cue.start - previousEnd < 0.5
+      let fresh = adjacent ? cue.lines.filter { !previous.contains($0) } : cue.lines
+      previous = cue.lines
+      previousEnd = cue.end
+      guard !fresh.isEmpty else { continue }
+      result.append(Cue(start: cue.start, end: cue.end, text: fresh.joined(separator: "\n")))
+    }
+    return result
   }
 
   /// `00:00:03.000 --> 00:00:06.000 align:start position:0%`

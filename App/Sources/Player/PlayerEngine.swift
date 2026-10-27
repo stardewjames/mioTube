@@ -163,7 +163,10 @@ final class PlayerEngine {
     guard player.currentItem != nil else { return }
     activateAudioSession()
     interruptedByCall = false
-    player.playImmediately(atRate: rate)
+    // `play()` (not `playImmediately`) lets AVPlayer wait for enough buffer; forcing playback
+    // on an empty buffer after a jump made it repeat one frame instead of loading.
+    player.defaultRate = rate
+    player.play()
     onStateChange?()
   }
 
@@ -243,7 +246,8 @@ final class PlayerEngine {
   /// is parked there, otherwise seek.
   func jumpOverSegment(to target: Double) {
     limitForwardBuffer(nil)
-    guard let ready = standby, ready.isPositioned, abs(ready.target - target) < 1, canSwapPlayers else {
+    guard let ready = standby, ready.isPositioned, abs(ready.target - target) < 1, canSwapPlayers,
+          Self.hasBuffer(ready.item, at: ready.target) else {
       discardStandby()
       seekPast(target)
       return
@@ -296,7 +300,7 @@ final class PlayerEngine {
     if surface.playerLayer.player != nil { surface.attach(newPlayer) }
     let landed = item.currentTime().seconds
     if landed.isFinite { position = landed }
-    if wasPlaying { newPlayer.playImmediately(atRate: rate) }
+    if wasPlaying { newPlayer.play() }
     old.replaceCurrentItem(with: nil)
     onStateChange?()
   }
@@ -351,6 +355,26 @@ final class PlayerEngine {
   private static func configure(_ player: AVPlayer) {
     player.automaticallyWaitsToMinimizeStalling = true
     player.allowsExternalPlayback = true
+    // Captions are drawn by CaptionOverlay; AVPlayer must not also render a legible track.
+    player.appliesMediaSelectionCriteriaAutomatically = false
+  }
+
+  /// The standby is only worth swapping to once it actually holds media past the target.
+  private static func hasBuffer(_ item: AVPlayerItem, at seconds: Double) -> Bool {
+    if item.isPlaybackLikelyToKeepUp { return true }
+    return item.loadedTimeRanges.contains { value in
+      let range = value.timeRangeValue
+      return range.start.seconds <= seconds + 1 && range.end.seconds >= seconds + 3
+    }
+  }
+
+  /// Turns off any subtitle/CC rendition the stream carries.
+  private func disableNativeSubtitles(_ item: AVPlayerItem) {
+    let asset = item.asset
+    Task {
+      guard let group = try? await asset.loadMediaSelectionGroup(for: .legible) else { return }
+      item.select(nil, in: group)
+    }
   }
 
   private func bind(_ player: AVPlayer) {
@@ -417,6 +441,7 @@ final class PlayerEngine {
       guard status == .loading else { return }
       loadWatchdog?.cancel()
       status = .ready
+      if let item = player.currentItem { disableNativeSubtitles(item) }
       if pendingStart > 0 {
         seek(to: pendingStart)
         pendingStart = 0

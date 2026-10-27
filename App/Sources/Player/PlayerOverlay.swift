@@ -48,6 +48,9 @@ struct PlayerOverlay: View {
     if case .failed = coordinator.phase { return true }
     return false
   }
+  private var isLoading: Bool {
+    engine.isBuffering || coordinator.phase == .resolving || engine.status == .loading
+  }
 
   var body: some View {
     GeometryReader { proxy in
@@ -77,10 +80,14 @@ struct PlayerOverlay: View {
             .transition(.opacity)
         }
 
-        if engine.isBuffering || coordinator.phase == .resolving || engine.status == .loading {
+        // With controls showing, the spinner lives inside the play button; only when they're
+        // hidden does it appear on its own, so it never sits on top of a control.
+        if isLoading && !controlsVisible {
           ProgressView()
             .controlSize(coordinator.isFullscreen ? .large : .regular)
             .tint(.white)
+            .padding(10)
+            .glassControl(interactive: false)
             .allowsHitTesting(false)
         }
       }
@@ -236,13 +243,21 @@ struct PlayerOverlay: View {
         transportButton("gobackward.10", label: "Back 10 seconds") { engine.skip(by: -10) }
 
         Button { engine.togglePlayPause(); touch() } label: {
-          Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
-            .font(metrics.playFont)
-            .contentTransition(.symbolEffect(.replace))
-            .frame(width: metrics.play, height: metrics.play)
+          ZStack {
+            if isLoading {
+              ProgressView()
+                .controlSize(coordinator.isFullscreen ? .large : .regular)
+                .tint(.white)
+            } else {
+              Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
+                .font(metrics.playFont)
+                .contentTransition(.symbolEffect(.replace))
+            }
+          }
+          .frame(width: metrics.play, height: metrics.play)
         }
         .glassControl()
-        .accessibilityLabel(engine.isPlaying ? "Pause" : "Play")
+        .accessibilityLabel(isLoading ? "Loading, pause" : (engine.isPlaying ? "Pause" : "Play"))
 
         transportButton("goforward.10", label: "Forward 10 seconds") { engine.skip(by: 10) }
         transportButton("forward.end.fill", label: "Next", enabled: coordinator.hasNext) { coordinator.advance(.user) }

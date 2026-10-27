@@ -21,7 +21,7 @@ public enum FeedParser {
     return FeedPage(
       sections: builder.sections,
       continuation: builder.pageContinuation,
-      droppedAds: dropped,
+      droppedAds: dropped + builder.droppedServiceContent,
       chips: uniqueChips(chips),
       header: parseHeader(root),
       tabs: parseTabs(root),
@@ -61,6 +61,8 @@ public enum FeedParser {
     var sections: [FeedSection] = []
     var chips: [SearchChip] = []
     var pageContinuation: String?
+    /// Streaming-service items and shelves removed (Movies & TV, Primetime Channels, …).
+    var droppedServiceContent = 0
 
     private var openTitle: String?
     private var openItems: [FeedItem] = []
@@ -101,9 +103,15 @@ public enum FeedParser {
         if key == "header" { collectChips(value) }
         return
       }
-      if let item = ItemParser.parse(key, value) {
+      switch ItemParser.parseFiltered(key, value) {
+      case .item(let item):
         append(item)
         return
+      case .excluded:
+        droppedServiceContent += 1
+        return
+      case .notItem:
+        break
       }
       switch key {
       case "continuationItemRenderer", "continuationItemViewModel":
@@ -114,6 +122,10 @@ public enum FeedParser {
         if let chip = Self.chip(value) { chips.append(chip) }
       case let shelf where Self.shelves.contains(shelf) && !inShelf:
         let title = value["title"]?.text ?? value["header"]?.first(key: "title")?.text
+        if StreamingContentFilter.isServiceShelf(title: title) {
+          droppedServiceContent += 1
+          return
+        }
         flush()
         inShelf = true
         openTitle = title

@@ -249,12 +249,17 @@ public enum WatchParser {
         return
       }
       for (key, value) in object {
-        if let item = ItemParser.parse(key, value) {
+        switch ItemParser.parseFiltered(key, value) {
+        case .item(let item):
           if case .video(let video) = item, seen.insert(video.videoID).inserted { videos.append(video) }
-        } else if key == "continuationItemRenderer" {
-          continuation = RendererTree.continuationToken(value)
-        } else if key != "menu" && key != "header" {
-          visit(value)
+        case .excluded:
+          continue
+        case .notItem:
+          if key == "continuationItemRenderer" {
+            continuation = RendererTree.continuationToken(value)
+          } else if key != "menu" && key != "header" {
+            visit(value)
+          }
         }
       }
     }
