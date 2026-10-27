@@ -1,0 +1,33 @@
+name: MioTube
+options:
+  bundleIdPrefix: dev.miotube
+  deploymentTarget: { iOS: "26.0" }
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+    SWIFT_STRICT_CONCURRENCY: complete
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+packages:
+  MioTubeCore: { path: .. }
+targets:
+  MioTube:
+    type: application
+    platform: iOS
+    sources: [ Sources ]
+    dependencies:
+      - { package: MioTubeCore, product: MioTubeCore }
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.miotube.app
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+schemes:
+  MioTube:
+    build: { targets: { MioTube: all } }
+    run: { config: Debug }
+    archive: { config: Release }

@@ -1,0 +1,11 @@
+.build/
+DerivedData/
+*.xcodeproj
+xcuserdata/
+.DS_Store
+App/Generated/
+.swiftpm/
+# SwiftPM-on-Windows drops resource-bundle copies in the package root
+/ClientProfiles.json
+/Info.plist
+/Fixtures/

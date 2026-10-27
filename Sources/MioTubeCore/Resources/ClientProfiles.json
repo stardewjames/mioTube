@@ -1,0 +1,78 @@
+{
+  "apiKey": "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+  "metadataProfile": "web",
+  "playbackOrder": ["web_safari", "mweb", "web_embedded", "visionos", "tv"],
+  "profiles": [
+    {
+      "id": "web",
+      "clientName": "WEB",
+      "clientVersion": "2.20260708.00.00",
+      "clientNameHeader": 1,
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      "supportsCookies": true,
+      "supportsHLS": false,
+      "requiresJSPlayer": true,
+      "extraContext": null
+    },
+    {
+      "id": "web_safari",
+      "clientName": "WEB",
+      "clientVersion": "2.20260708.00.00",
+      "clientNameHeader": 1,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)",
+      "supportsCookies": true,
+      "supportsHLS": true,
+      "requiresJSPlayer": false,
+      "extraContext": null
+    },
+    {
+      "id": "mweb",
+      "clientName": "MWEB",
+      "clientVersion": "2.20260708.05.00",
+      "clientNameHeader": 2,
+      "userAgent": "Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1,gzip(gfe)",
+      "supportsCookies": true,
+      "supportsHLS": true,
+      "requiresJSPlayer": false,
+      "extraContext": null
+    },
+    {
+      "id": "web_embedded",
+      "clientName": "WEB_EMBEDDED_PLAYER",
+      "clientVersion": "2.20260708.00.00",
+      "clientNameHeader": 56,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)",
+      "supportsCookies": true,
+      "supportsHLS": true,
+      "requiresJSPlayer": false,
+      "extraContext": null
+    },
+    {
+      "id": "visionos",
+      "clientName": "VISIONOS",
+      "clientVersion": "1.02",
+      "clientNameHeader": 101,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+      "supportsCookies": false,
+      "supportsHLS": true,
+      "requiresJSPlayer": false,
+      "extraContext": {
+        "deviceMake": "Apple",
+        "deviceModel": "RealityDevice17,1",
+        "osName": "visionOS",
+        "osVersion": "26.5.23O471"
+      }
+    },
+    {
+      "id": "tv",
+      "clientName": "TVHTML5",
+      "clientVersion": "7.20260707.07.00",
+      "clientNameHeader": 7,
+      "userAgent": "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)",
+      "supportsCookies": true,
+      "supportsHLS": true,
+      "requiresJSPlayer": false,
+      "extraContext": null
+    }
+  ]
+}

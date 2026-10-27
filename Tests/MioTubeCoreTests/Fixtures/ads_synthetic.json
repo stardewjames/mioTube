@@ -1,0 +1,29 @@
+{
+  "contents": {
+    "twoColumnBrowseResultsRenderer": {
+      "tabs": [{
+        "tabRenderer": {
+          "selected": true,
+          "content": {
+            "richGridRenderer": {
+              "contents": [
+                {"richItemRenderer": {"content": {"adSlotRenderer": {"slotId": "1", "fulfillmentContent": {"fulfilledLayout": {"inFeedAdLayoutRenderer": {"renderingContent": {"videoRenderer": {"videoId": "AD0000000001", "title": {"runs": [{"text": "Ad: Buy now"}]}}}}}}}}}},
+                {"richItemRenderer": {"content": {"videoRenderer": {"videoId": "REAL00000001", "title": {"runs": [{"text": "Real video one"}]}, "ownerText": {"runs": [{"text": "Channel", "navigationEndpoint": {"browseEndpoint": {"browseId": "UCchannel"}}}]}, "lengthText": {"simpleText": "4:05"}, "viewCountText": {"simpleText": "1,234 views"}, "publishedTimeText": {"simpleText": "2 days ago"}, "thumbnail": {"thumbnails": [{"url": "https://i.ytimg.com/vi/REAL00000001/hq.jpg", "width": 480}]}}}}},
+                {"richItemRenderer": {"content": {"videoRenderer": {"videoId": "PROMO0000001", "isPromoted": true, "title": {"runs": [{"text": "Sponsored upload"}]}}}}},
+                {"richSectionRenderer": {"content": {"statementBannerRenderer": {"title": {"simpleText": "Get Premium"}}}}},
+                {"richSectionRenderer": {"content": {"richShelfRenderer": {"title": {"runs": [{"text": "Trending"}]}, "contents": [
+                  {"richItemRenderer": {"content": {"videoRenderer": {"videoId": "REAL00000002", "title": {"runs": [{"text": "Real video two"}]}, "lengthText": {"simpleText": "1:02:03"}}}}},
+                  {"richItemRenderer": {"content": {"promotedVideoRenderer": {"videoId": "AD0000000002", "title": {"simpleText": "Promoted"}}}}}
+                ]}}}},
+                {"continuationItemRenderer": {"continuationEndpoint": {"continuationCommand": {"token": "NEXT_TOKEN"}}}}
+              ]
+            }
+          }
+        }
+      }]
+    }
+  },
+  "header": {
+    "searchPyvRenderer": {"ads": []}
+  }
+}
