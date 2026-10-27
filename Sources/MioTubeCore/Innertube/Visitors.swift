@@ -14,10 +14,19 @@ public struct InnertubeConfig: Sendable, Equatable {
   /// Extracts `INNERTUBE_CLIENT_VERSION` and `VISITOR_DATA` from youtube.com HTML.
   public static func scrape(_ html: String, at date: Date = Date()) -> InnertubeConfig {
     InnertubeConfig(
-      clientVersion: firstCapture(in: html, key: "INNERTUBE_CLIENT_VERSION"),
+      clientVersion: firstCapture(in: html, key: "INNERTUBE_CLIENT_VERSION").flatMap(sanitizedVersion),
       visitorData: firstCapture(in: html, key: "VISITOR_DATA"),
       fetchedAt: date
     )
+  }
+
+  /// Canary builds report e.g. `2.20261027.01.00-canary_experiment_2.20261026.01.00`; only the
+  /// leading dotted-numeric version is a valid `clientVersion`.
+  static func sanitizedVersion(_ raw: String) -> String? {
+    let head = raw.prefix { $0.isNumber || $0 == "." }
+    let parts = head.split(separator: ".", omittingEmptySubsequences: false)
+    guard parts.count >= 2, parts.allSatisfy({ !$0.isEmpty }) else { return nil }
+    return String(head)
   }
 
   static func firstCapture(in html: String, key: String) -> String? {

@@ -159,6 +159,12 @@ import Testing
     #expect(config.visitorData == "CgtABC%3D%3D")
   }
 
+  @Test func canaryVersionSuffixIsStripped() {
+    let html = #""INNERTUBE_CLIENT_VERSION":"2.20261027.01.00-canary_experiment_2.20261026.01.00""#
+    #expect(InnertubeConfig.scrape(html).clientVersion == "2.20261027.01.00")
+    #expect(InnertubeConfig.scrape(#""INNERTUBE_CLIENT_VERSION":"garbage""#).clientVersion == nil)
+  }
+
   @Test func adoptsResponseVisitorDataWhenScrapeFails() async throws {
     let spy = SpyTransport { request in
       if request.url.path == "/" { throw MioTubeError.http(status: 503, body: "") }
