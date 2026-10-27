@@ -13,7 +13,9 @@ struct MiniPlayerBar: View {
       HStack(spacing: 10) {
         ZStack {
           RemoteImage(url: item.video.bestThumbnailURL)
-          PlayerLayerView(engine: coordinator.engine, isActive: !coordinator.isWatchPresented)
+          if coordinator.phase == .playing {
+            PlayerLayerView(engine: coordinator.engine, isActive: !coordinator.isWatchPresented)
+          }
         }
         .frame(width: 64, height: 36)
         .clipShape(.rect(cornerRadius: 6))

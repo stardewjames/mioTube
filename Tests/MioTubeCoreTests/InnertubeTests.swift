@@ -159,6 +159,24 @@ import Testing
     #expect(config.visitorData == "CgtABC%3D%3D")
   }
 
+  @Test func adoptsResponseVisitorDataWhenScrapeFails() async throws {
+    let spy = SpyTransport { request in
+      if request.url.path == "/" { throw MioTubeError.http(status: 503, body: "") }
+      return HTTPResponse(status: 200, data: Data(#"{"responseContext":{"visitorData":"VD123"}}"#.utf8))
+    }
+    let provider = InnertubeConfigProvider(transport: spy, userAgent: "UA")
+    let client = InnertubeClient(
+      transport: spy, catalog: try testCatalog(), session: InMemorySessionStore(), config: provider, locale: .enUS
+    )
+    _ = try await client.post("browse", ["browseId": "FEwhat_to_watch"])
+    _ = try await client.post("player", ["videoId": "x"], profileID: "visionos")
+    let player = try #require(spy.requests.last)
+    #expect(player.headers["X-Goog-Visitor-Id"] == "VD123")
+    #expect(player.jsonBody?["context", "client", "visitorData"] == "VD123")
+    // The failed scrape is not retried on every request.
+    #expect(spy.requests.filter { $0.url.path == "/" }.count == 1)
+  }
+
   @Test func providerIsSingleFlightAndCached() async {
     let spy = SpyTransport { _ in
       HTTPResponse(status: 200, data: Data(#""INNERTUBE_CLIENT_VERSION":"2.1""#.utf8))

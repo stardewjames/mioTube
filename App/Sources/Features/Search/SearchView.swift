@@ -38,7 +38,9 @@ struct SearchView: View {
         }
         try? await Task.sleep(for: .milliseconds(200))
         guard !Task.isCancelled else { return }
-        suggestions = await env.suggestions.suggestions(for: query)
+        let fetched = await env.suggestions.suggestions(for: query)
+        guard !Task.isCancelled, query != submitted else { return }
+        suggestions = fetched
       }
       .onChange(of: model?.page?.chips) { _, chips in
         if filter == nil, let chips, !chips.isEmpty { baseChips = chips }

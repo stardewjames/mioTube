@@ -291,33 +291,35 @@ final class PlaybackCoordinator {
     let videoID = item.video.videoID
     let maxHeight = quality.maxHeight
     let resolver = resolver
+    let client = client
 
     loadTask = Task {
+      // `next` and SponsorBlock don't depend on the stream; fetch them alongside resolution so
+      // the info panel fills in even when playback fails.
+      async let nextJSON = try? client.post("next", ["videoId": .string(videoID)])
+      async let segments = loadSegments(videoID: videoID)
       let resolution = await withTimeout(seconds: 30) {
         await resolver.resolveDetailed(videoID: videoID, maxHeight: maxHeight)
       }
       guard !Task.isCancelled, current?.id == item.id else { return }
-      guard let resolution else {
+      if let resolution {
+        lastResolution = resolution
+        if case .unavailable(let failure) = resolution.source {
+          fail(failure)
+        } else {
+          let resume = await progress.resumePosition(for: videoID)
+          guard !Task.isCancelled, current?.id == item.id else { return }
+          engine.load(resolution.source, startAt: resume, quality: quality, pipAutoStart: settings.pipAutoStart)
+          phase = .playing
+        }
+      } else {
         fail(PlaybackFailure(reasons: [.init(profile: "all", reason: "Timed out after 30 s")]))
-        return
       }
-      lastResolution = resolution
-      if case .unavailable(let failure) = resolution.source {
-        fail(failure)
-        return
-      }
-      let resume = await progress.resumePosition(for: videoID)
-      guard !Task.isCancelled, current?.id == item.id else { return }
-      engine.load(
-        resolution.source, startAt: resume, quality: quality, pipAutoStart: settings.pipAutoStart
-      )
-      phase = .playing
 
-      async let watch = loadWatchInfo(videoID: videoID, player: resolution.player ?? .null)
-      async let segments = loadSegments(videoID: videoID)
-      let (loadedInfo, loadedSegments) = await (watch, segments)
+      let (next, loadedSegments) = await (nextJSON, segments)
       guard !Task.isCancelled, current?.id == item.id else { return }
-      if let loadedInfo {
+      if let next {
+        let loadedInfo = WatchParser.parse(next: next, player: resolution?.player ?? .null, adFilter: .init())
         info = loadedInfo
         captionTracks = loadedInfo.captionTracks
         AppEnvironment.shared.diagnostics.record(watchDroppedAds: loadedInfo.droppedAds)
@@ -335,11 +337,6 @@ final class PlaybackCoordinator {
   private func fail(_ failure: PlaybackFailure) {
     phase = .failed(failure)
     self.failure = failure
-  }
-
-  private func loadWatchInfo(videoID: String, player: JSONValue) async -> WatchInfo? {
-    guard let next = try? await client.post("next", ["videoId": .string(videoID)]) else { return nil }
-    return WatchParser.parse(next: next, player: player, adFilter: .init())
   }
 
   private func loadSegments(videoID: String) async -> [SponsorSegment] {

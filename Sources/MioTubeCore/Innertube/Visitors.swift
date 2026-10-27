@@ -48,8 +48,12 @@ public actor InnertubeConfigProvider {
 
   public var current: InnertubeConfig? { cached }
 
+  private var lastFailure: Date?
+  static let failureBackoff: TimeInterval = 5 * 60
+
   public func config() async -> InnertubeConfig? {
     if let cached, Date().timeIntervalSince(cached.fetchedAt) < ttl { return cached }
+    if let lastFailure, Date().timeIntervalSince(lastFailure) < Self.failureBackoff { return cached }
     if let inFlight { return await inFlight.value }
     let transport = transport
     let userAgent = userAgent
@@ -71,12 +75,22 @@ public actor InnertubeConfigProvider {
     inFlight = task
     let result = await task.value
     inFlight = nil
-    if let result { cached = result }
+    if let result { cached = result } else { lastFailure = Date() }
     return result ?? cached
   }
 
   /// Drops the cached value so the next `config()` refetches (Diagnostics "Re-probe").
   public func invalidate() {
     cached = nil
+    lastFailure = nil
+  }
+
+  /// Fallback when youtube.com could not be scraped: reuse the `responseContext.visitorData`
+  /// InnerTube hands out. Without any visitor id, anonymous `player` calls hit the bot check.
+  public func adopt(visitorData: String) {
+    guard !visitorData.isEmpty, cached?.visitorData == nil else { return }
+    cached = InnertubeConfig(
+      clientVersion: cached?.clientVersion, visitorData: visitorData, fetchedAt: cached?.fetchedAt ?? Date()
+    )
   }
 }

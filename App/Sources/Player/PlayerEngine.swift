@@ -121,6 +121,7 @@ final class PlayerEngine {
   // MARK: Transport
 
   func play() {
+    guard player.currentItem != nil else { return }
     activateAudioSession()
     interruptedByCall = false
     player.playImmediately(atRate: rate)

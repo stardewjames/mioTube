@@ -19,6 +19,10 @@ struct PlayerOverlay: View {
 
   private var coordinator: PlaybackCoordinator { env.coordinator }
   private var engine: PlayerEngine { env.coordinator.engine }
+  private var isFailed: Bool {
+    if case .failed = coordinator.phase { return true }
+    return false
+  }
 
   var body: some View {
     GeometryReader { proxy in
@@ -68,9 +72,16 @@ struct PlayerOverlay: View {
     VStack(spacing: 0) {
       topBar
       Spacer(minLength: 0)
-      transport
+      // On failure transport is replaced by Retry (the surface shows the dimmed thumbnail).
+      if isFailed {
+        Button("Retry", systemImage: "arrow.clockwise") { coordinator.retry() }
+          .buttonStyle(.glass)
+          .controlSize(.large)
+      } else {
+        transport
+      }
       Spacer(minLength: 0)
-      scrubber
+      if !isFailed { scrubber }
     }
     .padding(coordinator.isFullscreen ? 20 : 10)
     .background(

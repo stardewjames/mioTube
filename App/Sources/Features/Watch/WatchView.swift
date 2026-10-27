@@ -65,10 +65,7 @@ struct VideoSurface: View {
       if case .failed = env.coordinator.phase {
         RemoteImage(url: env.coordinator.current?.video.bestThumbnailURL)
           .overlay(Color.black.opacity(0.5))
-          .overlay {
-            Button("Retry", systemImage: "arrow.clockwise") { env.coordinator.retry() }
-              .buttonStyle(.glass)
-          }
+          .allowsHitTesting(false)
       }
       CaptionOverlay()
       PlayerOverlay()

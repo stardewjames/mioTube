@@ -72,6 +72,9 @@ public actor InnertubeClient {
     )
     let response = try await transport.send(request)
     let json = try JSONValue.decode(response.data)
+    if live?.visitorData == nil, let visitor = json["responseContext", "visitorData"]?.string {
+      await config?.adopt(visitorData: visitor)
+    }
     if request.headers["Authorization"] != nil,
        json["responseContext", "mainAppWebResponseContext", "loggedOut"]?.bool == true {
       throw MioTubeError.unauthorized
