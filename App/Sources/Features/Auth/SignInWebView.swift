@@ -103,18 +103,13 @@ struct SignInWebView: UIViewRepresentable {
         let isGoogleAuth = domain.hasSuffix("google.com") && GoogleSession.googleDomainCookieNames.contains(cookie.name)
         guard isYouTube || isGoogleAuth else { continue }
         if result[cookie.name] == nil || isYouTube { result[cookie.name] = cookie.value }
-        if authCookieNames.contains(cookie.name), let date = cookie.expiresDate {
+        if GoogleSession.authCookieNames.contains(cookie.name), let date = cookie.expiresDate {
           expiry = expiry.map { min($0, date) } ?? date
         }
       }
       guard result["SAPISID"] != nil || result["__Secure-3PAPISID"] != nil else { return nil }
       return (result, expiry ?? Date().addingTimeInterval(30 * 86_400))
     }
-
-    static let authCookieNames: Set<String> = [
-      "SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PSID",
-      "__Secure-1PAPISID", "__Secure-3PAPISID", "LOGIN_INFO",
-    ]
   }
 }
 

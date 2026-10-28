@@ -13,6 +13,17 @@ import Testing
     try await actions.setLike(.none, videoID: "v1")
     #expect(spy.requests.map(\.url.path) == ["/youtubei/v1/like/like", "/youtubei/v1/like/dislike", "/youtubei/v1/like/removelike"])
     #expect(spy.requests.allSatisfy { $0.jsonBody?["target", "videoId"] == "v1" && $0.headers["Authorization"] != nil })
+    // Replaying a write into a 429/5xx is what escalates to abuse detection.
+    #expect(spy.requests.allSatisfy { !$0.retryable })
+  }
+
+  @Test func readsKeepTransportRetries() async throws {
+    let spy = SpyTransport(body: Self.ok)
+    let actions = AccountActions(client: try makeClient(spy, session: testSession))
+    try await actions.validateSession()
+    try await actions.accountInfo()
+    #expect(spy.requests.count == 2)
+    #expect(spy.requests.allSatisfy { $0.retryable })
   }
 
   @Test func subscribeSendsParamsOnlyWhenKnown() async throws {

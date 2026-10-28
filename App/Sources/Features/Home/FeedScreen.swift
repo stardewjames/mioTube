@@ -16,36 +16,45 @@ nonisolated enum Route: Hashable {
   case pasteCookies
 }
 
-/// Stale-while-revalidate state for one feed key.
+/// Cached-first state for one feed key; always revalidates over the network.
 @Observable
 final class FeedModel {
   let key: FeedKey
   private(set) var page: FeedPage?
   private(set) var isLoading = false
+  private(set) var isRefreshing = false
   private(set) var isLoadingMore = false
   private(set) var error: String?
   private(set) var reachedEnd = false
   @ObservationIgnored private var loadedRevision = -1
-
-  static let staleAfter: TimeInterval = 10 * 60
+  @ObservationIgnored private var isFetching = false
 
   init(key: FeedKey) {
     self.key = key
   }
 
-  /// Cached page first (no network); network refresh when forced, missing or stale.
+  /// Cached page first (instant first paint), then the network on every appearance or reload.
+  /// Reopening a feed must show current recommendations, so a stale snapshot is never enough to
+  /// skip the request; `force` (pull-to-refresh, Reload button) also resets pagination.
   func load(_ env: AppEnvironment, force: Bool = false) async {
-    if force || loadedRevision != env.sessionRevision { reachedEnd = false }
-    if !force, page == nil, let cached = await env.feedLoader.cached(key) {
+    if page == nil, let cached = await env.feedLoader.cached(key) {
       page = cached
+      reachedEnd = cached.continuation == nil
     }
-    let savedAt = await env.feedCache.savedAt(for: key)
-    let stale = savedAt.map { Date().timeIntervalSince($0) > Self.staleAfter } ?? true
-    let revisionChanged = loadedRevision != env.sessionRevision
-    guard force || page == nil || stale || revisionChanged else { return }
+    guard force || !isFetching else { return }
+    await fetch(env, force: force)
+  }
+
+  private func fetch(_ env: AppEnvironment, force: Bool) async {
+    if force || loadedRevision != env.sessionRevision { reachedEnd = false }
     loadedRevision = env.sessionRevision
-    isLoading = page == nil
-    defer { isLoading = false }
+    isFetching = true
+    if page == nil { isLoading = true } else { isRefreshing = true }
+    defer {
+      isLoading = false
+      isRefreshing = false
+      isFetching = false
+    }
     do {
       let fresh = try await env.feedLoader.load(key, forceRefresh: true)
       page = fresh
@@ -56,7 +65,8 @@ final class FeedModel {
       env.account.markExpired()
       error = "Session expired — sign in again"
     } catch {
-      if page == nil { self.error = Self.describe(error) }
+      // A refresh that fails keeps the last good page on screen; the banner above it says why.
+      error = Self.describe(error)
     }
   }
 
@@ -99,6 +109,9 @@ struct FeedScrollView<Header: View>: View {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: 16, pinnedViews: []) {
         header
+        if model.page != nil, let error = model.error {
+          FeedErrorBanner(message: error) { Task { await model.load(env, force: true) } }
+        }
         if let page = model.page {
           ForEach(page.sections) { section in
             if let title = section.title {
@@ -131,6 +144,21 @@ struct FeedScrollView<Header: View>: View {
     .scrollEdgeEffectStyle(.soft, for: .top)
     .refreshable { await model.load(env, force: true) }
     .task(id: env.sessionRevision) { await model.load(env) }
+    .toolbar {
+      ToolbarItem(placement: .topBarLeading) {
+        Button {
+          Task { await model.load(env, force: true) }
+        } label: {
+          if model.isRefreshing {
+            ProgressView().controlSize(.small)
+          } else {
+            Image(systemName: "arrow.clockwise")
+          }
+        }
+        .disabled(model.isRefreshing)
+        .accessibilityLabel("Reload")
+      }
+    }
   }
 
   @ViewBuilder
@@ -148,6 +176,30 @@ struct FeedScrollView<Header: View>: View {
 extension FeedScrollView where Header == EmptyView {
   init(model: FeedModel, style: FeedStyle = .grid) {
     self.init(model: model, style: style) { EmptyView() }
+  }
+}
+
+/// Refresh failure above an already-loaded page (the feed itself stays visible).
+struct FeedErrorBanner: View {
+  let message: String
+  let retry: () -> Void
+
+  var body: some View {
+    GlassPanel {
+      HStack(spacing: 10) {
+        Image(systemName: "exclamationmark.triangle.fill")
+          .foregroundStyle(.orange)
+        Text(message)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .lineLimit(2)
+        Spacer(minLength: 8)
+        Button("Retry", action: retry)
+          .buttonStyle(.glassProminent)
+          .font(.caption.weight(.semibold))
+      }
+      .padding(12)
+    }
   }
 }
 

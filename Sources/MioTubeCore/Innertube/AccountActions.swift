@@ -42,7 +42,7 @@ public struct AccountActions: Sendable {
     case .dislike: "like/dislike"
     case .none: "like/removelike"
     }
-    _ = try await client.post(endpoint, ["target": ["videoId": .string(videoID)]])
+    _ = try await client.post(endpoint, ["target": ["videoId": .string(videoID)]], retryable: false)
   }
 
   /// `params` comes from the watch page's `subscribeButtonRenderer`; omitted when absent.
@@ -50,7 +50,9 @@ public struct AccountActions: Sendable {
     try await requireSession()
     var body: [String: JSONValue] = ["channelIds": [.string(channelID)]]
     if subscribed, let params { body["params"] = .string(params) }
-    _ = try await client.post(subscribed ? "subscription/subscribe" : "subscription/unsubscribe", .object(body))
+    _ = try await client.post(
+      subscribed ? "subscription/subscribe" : "subscription/unsubscribe", .object(body), retryable: false
+    )
   }
 
   public func playlistOptions(videoID: String) async throws -> [PlaylistOption] {
@@ -64,7 +66,7 @@ public struct AccountActions: Sendable {
     _ = try await client.post("browse/edit_playlist", [
       "playlistId": .string(playlistID),
       "actions": [["action": "ACTION_ADD_VIDEO", "addedVideoId": .string(videoID)]],
-    ])
+    ], retryable: false)
   }
 
   public func removeFromPlaylist(videoID: String, playlistID: String) async throws {
@@ -72,7 +74,7 @@ public struct AccountActions: Sendable {
     _ = try await client.post("browse/edit_playlist", [
       "playlistId": .string(playlistID),
       "actions": [["action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID", "removedVideoId": .string(videoID)]],
-    ])
+    ], retryable: false)
   }
 
   /// Name + avatar of the signed-in account.

@@ -48,7 +48,11 @@ struct DiagnosticsView: View {
         Button {
           Task { await probe() }
         } label: {
-          if probing { ProgressView() } else { Label("Re-probe", systemImage: "arrow.clockwise") }
+          if probing {
+            ProgressView()
+          } else {
+            Label(probes.isEmpty ? "Probe" : "Re-probe", systemImage: "arrow.clockwise")
+          }
         }
         .disabled(probing)
       } header: {
@@ -84,7 +88,6 @@ struct DiagnosticsView: View {
     .navigationTitle("Diagnostics")
     .task {
       config = await env.configProvider.config()
-      if probes.isEmpty { await probe() }
     }
   }
 

@@ -102,10 +102,12 @@ import Testing
     // Live WEB version must not leak into other clients.
     #expect(request.headers["X-YouTube-Client-Version"] == "1.02")
     #expect(request.headers["X-Goog-Visitor-Id"] == "VD")
+    #expect(request.headers["X-Youtube-Bootstrap-Logged-In"] == "false")
     #expect(request.headers["Authorization"] == nil)
     let body = try #require(request.jsonBody)
     #expect(body["videoId"] == "abc")
     #expect(body["context", "client", "osName"] == "visionOS")
+    #expect(body["context", "client", "userAgent"]?.string == profile.userAgent)
     #expect(body["context", "user", "lockedSafetyMode"] == .bool(false))
   }
 
@@ -127,6 +129,7 @@ import Testing
     #expect(headers["Authorization"]?.hasPrefix("SAPISIDHASH ") == true)
     #expect(headers["Cookie"] == "HSID=hsid; SAPISID=AbCdEf123456; SID=sid-value")
     #expect(headers["X-Goog-AuthUser"] == "0")
+    #expect(headers["X-Youtube-Bootstrap-Logged-In"] == "true")
   }
 
   @Test func cookielessProfileNeverGetsCookies() async throws {
@@ -215,6 +218,15 @@ import Testing
     let parsed = CookieJar.parse(file)
     #expect(parsed.cookies == ["SAPISID": "yt-value", "SID": "sid"])
     #expect(parsed.earliestExpiry == Date(timeIntervalSince1970: 1_790_000_000))
+  }
+
+  @Test func nonAuthCookieExpiryDoesNotAgeOutTheSession() {
+    let file = """
+    .youtube.com\tTRUE\t/\tTRUE\t1700000000\tVISITOR_INFO1_LIVE\tv
+    .youtube.com\tTRUE\t/\tTRUE\t1900000000\tSAPISID\tyt-value
+    """
+    let parsed = CookieJar.parse(file)
+    #expect(parsed.earliestExpiry == Date(timeIntervalSince1970: 1_900_000_000))
   }
 
   @Test func retryPolicyHonoursRetryAfterAndStops() {

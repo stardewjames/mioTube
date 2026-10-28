@@ -38,6 +38,9 @@ public enum CookieJar {
     return result
   }
 
+  /// Netscape rows. Echoing a whole browser jar means short-lived cookies (`VISITOR_INFO1_LIVE`,
+  /// `PREF`, …) would otherwise mark the session expired days before the Google login actually
+  /// lapses, so only auth-cookie expiries are reported.
   static func parseNetscape(_ text: String) -> Parsed {
     var cookies: [String: String] = [:]
     var earliest: Date?
@@ -53,7 +56,7 @@ public enum CookieJar {
       let value = fields[6...].joined(separator: "\t").trimmingCharacters(in: .whitespacesAndNewlines)
       // youtube.com rows win over google.com rows with the same name.
       if cookies[name] == nil || domain.hasSuffix("youtube.com") { cookies[name] = value }
-      if let expiry = TimeInterval(fields[4]), expiry > 0 {
+      if let expiry = TimeInterval(fields[4]), expiry > 0, GoogleSession.authCookieNames.contains(name) {
         let date = Date(timeIntervalSince1970: expiry)
         earliest = earliest.map { min($0, date) } ?? date
       }

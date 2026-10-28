@@ -68,7 +68,6 @@ public actor FeedCache {
     var pages: [FeedPage]
     /// InnerTube endpoint that produced the pages; continuations must go back to it.
     var endpoint: String
-    var savedAt: Date
   }
 
   private let directory: URL?
@@ -100,15 +99,13 @@ public actor FeedCache {
     return merged
   }
 
-  public func savedAt(for key: FeedKey) -> Date? { entry(key)?.savedAt }
-
   public func endpoint(for key: FeedKey) -> String? { entry(key)?.endpoint }
 
   public func continuation(for key: FeedKey) -> String? { entry(key)?.pages.last?.continuation }
 
   /// Replaces everything for `key` with a fresh first page.
   public func store(_ page: FeedPage, for key: FeedKey, endpoint: String = "browse") {
-    let entry = Entry(pages: [page], endpoint: endpoint, savedAt: Date())
+    let entry = Entry(pages: [page], endpoint: endpoint)
     entries[key] = entry
     loaded.insert(key)
     persist(entry, for: key)

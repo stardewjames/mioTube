@@ -126,6 +126,19 @@ import Testing
 }
 
 @Suite struct FeedLoaderTests {
+  /// Thread-safe call counter for request handlers.
+  final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func next() -> Int {
+      lock.withLock {
+        value += 1
+        return value
+      }
+    }
+  }
+
   static func channelSpy() -> SpyTransport {
     SpyTransport { request in
       let body = request.jsonBody
@@ -143,6 +156,24 @@ import Testing
     let second = try await loader.load(key, forceRefresh: false)
     #expect(spy.requests.count == requestsAfterFirst)
     #expect(first == second)
+  }
+
+  @Test func forcedReloadReplacesTheCachedPage() async throws {
+    let first = try Fixture.data("channel_videos.json")
+    let second = try Fixture.data("channel_videos_page2.json")
+    let counter = LockedCounter()
+    let spy = SpyTransport { _ in HTTPResponse(status: 200, data: counter.next() == 1 ? first : second) }
+    let cache = FeedCache(directory: nil)
+    let loader = FeedLoader(client: try makeClient(spy), cache: cache)
+    let key = FeedKey.channel("UCuAXFkgsw1L7xaCfnd5JJOw", .videos)
+
+    let firstPage = try await loader.load(key, forceRefresh: true)
+    let reloaded = try await loader.load(key, forceRefresh: true)
+
+    #expect(spy.requests.count == 2)
+    #expect(!reloaded.videos.isEmpty)
+    #expect(reloaded.videos.first?.videoID != firstPage.videos.first?.videoID)
+    #expect(await cache.page(for: key) == reloaded)
   }
 
   @Test func nextPageAppendsDistinctVideosOnSameEndpoint() async throws {

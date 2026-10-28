@@ -20,6 +20,14 @@ public struct GoogleSession: Codable, Sendable, Equatable {
 
   /// Names whose `.google.com` copies are accepted when capturing cookies.
   public static let googleDomainCookieNames: Set<String> = ["SID", "HSID", "SSID", "APISID", "SAPISID"]
+
+  /// Cookies that carry (or expire with) the Google session. Only these decide when a stored
+  /// session is considered expired; analytics/consent cookies expire much sooner and must not
+  /// force a re-sign-in.
+  public static let authCookieNames: Set<String> = [
+    "SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PSID",
+    "__Secure-1PAPISID", "__Secure-3PAPISID", "LOGIN_INFO",
+  ]
 }
 
 public protocol SessionProviding: Sendable {

@@ -23,19 +23,25 @@ public struct HTTPRequest: Sendable {
   public var headers: [String: String]
   public var body: Data?
   public var timeout: TimeInterval
+  /// Whether `URLSessionTransport` may retry this request on 429/5xx or a transient `URLError`.
+  /// Account-mutating POSTs turn this off: replaying a write into a rate limit is exactly the
+  /// pattern that gets flagged, and a like/subscribe does not need transparent retries.
+  public var retryable: Bool
 
   public init(
     method: HTTPMethod = .get,
     url: URL,
     headers: [String: String] = [:],
     body: Data? = nil,
-    timeout: TimeInterval = 20
+    timeout: TimeInterval = 20,
+    retryable: Bool = true
   ) {
     self.method = method
     self.url = url
     self.headers = headers
     self.body = body
     self.timeout = timeout
+    self.retryable = retryable
   }
 }
 
@@ -137,7 +143,7 @@ public actor URLSessionTransport: HTTPTransport {
       do {
         let response = try await perform(urlRequest)
         if (200..<300).contains(response.status) { return response }
-        if RetryPolicy.retryableStatuses.contains(response.status),
+        if request.retryable, RetryPolicy.retryableStatuses.contains(response.status),
            let delay = policy.delay(forRetry: retry, retryAfterHeader: response.header("Retry-After")) {
           retry += 1
           try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -145,7 +151,7 @@ public actor URLSessionTransport: HTTPTransport {
         }
         throw MioTubeError.http(status: response.status, body: String(decoding: response.data.prefix(2048), as: UTF8.self))
       } catch let error as URLError {
-        if RetryPolicy.isRetryable(error), let delay = policy.delay(forRetry: retry, retryAfterHeader: nil) {
+        if request.retryable, RetryPolicy.isRetryable(error), let delay = policy.delay(forRetry: retry, retryAfterHeader: nil) {
           retry += 1
           try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
           continue
