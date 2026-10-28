@@ -359,7 +359,10 @@ final class PlaybackCoordinator {
         return
       }
       lastResolution = resolution
-      engine.load(resolution.source, startAt: position, quality: quality, pipAutoStart: settings.pipAutoStart)
+      engine.load(
+        resolution.source, startAt: position, quality: quality, pipAutoStart: settings.pipAutoStart,
+        audioTrack: resolution.audioTrack
+      )
       phase = .playing
     }
   }
@@ -394,7 +397,10 @@ final class PlaybackCoordinator {
         } else {
           let resume = await progress.resumePosition(for: videoID)
           guard !Task.isCancelled, current?.id == item.id else { return }
-          engine.load(resolution.source, startAt: resume, quality: quality, pipAutoStart: settings.pipAutoStart)
+          engine.load(
+            resolution.source, startAt: resume, quality: quality, pipAutoStart: settings.pipAutoStart,
+            audioTrack: resolution.audioTrack
+          )
           phase = .playing
         }
       } else {

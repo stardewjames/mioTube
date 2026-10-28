@@ -63,6 +63,9 @@ public struct Resolution: Sendable {
   /// The `player` response that produced `source` (captions, duration, live flag).
   public let player: JSONValue?
   public let profileID: String?
+  /// Audio rendition to start on; `nil` when the stream has no alternative renditions or none
+  /// can be identified.
+  public let audioTrack: AudioTrack?
   public let probes: [ProfileProbe]
 }
 
@@ -139,7 +142,9 @@ public actor StreamResolver {
         let probe = Self.evaluate(json, profile: profile, maxHeight: maxHeight)
         probes.append(probe)
         if let source = probe.source, stopAtFirstSuccess {
-          return Resolution(source: source, player: json, profileID: id, probes: probes)
+          return Resolution(
+            source: source, player: json, profileID: id, audioTrack: AudioTrack.preferred(in: json), probes: probes
+          )
         }
       } catch MioTubeError.transport(let message) {
         offline = true
@@ -149,10 +154,12 @@ public actor StreamResolver {
       }
     }
     if !stopAtFirstSuccess, let success = probes.first(where: { $0.source != nil }), let source = success.source {
-      return Resolution(source: source, player: nil, profileID: success.profile, probes: probes)
+      return Resolution(source: source, player: nil, profileID: success.profile, audioTrack: nil, probes: probes)
     }
     let reasons = probes.map { PlaybackFailure.Reason(profile: $0.profile, reason: $0.reason ?? "no playable formats") }
-    return Resolution(source: .unavailable(PlaybackFailure(reasons: reasons)), player: nil, profileID: nil, probes: probes)
+    return Resolution(
+      source: .unavailable(PlaybackFailure(reasons: reasons)), player: nil, profileID: nil, audioTrack: nil, probes: probes
+    )
   }
 
   /// No ad context of any kind is sent: no `adPlaybackContext`, `playerAdParams`, or

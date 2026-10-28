@@ -239,4 +239,81 @@ import Testing
     ]
     #expect(StreamResolver.bestProgressive(formats, maxHeight: 1080) == nil)
   }
+
+  /// Multi-audio videos list dubs next to the original; only the original carries
+  /// `audioIsDefault`. Picking anything else plays the wrong language.
+  @Test func prefersTheDefaultAudioTrackOverDubs() {
+    let json: JSONValue = [
+      "streamingData": [
+        "adaptiveFormats": [
+          ["audioTrack": ["displayName": "Español", "id": "es.3", "audioIsDefault": false]],
+          ["audioTrack": ["displayName": "English (US) original", "id": "en-US.4", "audioIsDefault": true]],
+          ["audioTrack": ["displayName": "Español", "id": "es.3", "audioIsDefault": false]],
+        ]
+      ]
+    ]
+    #expect(AudioTrack.preferred(in: json) == AudioTrack(id: "en-US.4", languageTag: "en-US"))
+  }
+
+  /// Without the flag, the stream URL's `xtags` still marks which rendition is the original.
+  @Test func fallsBackToOriginalMarkerInStreamURL() {
+    let json: JSONValue = [
+      "streamingData": [
+        "adaptiveFormats": [
+          ["audioTrack": ["id": "es.3"], "url": "https://v/a?xtags=acont%3Ddubbed%3Alang%3Des"],
+          ["audioTrack": ["id": "en-US.4"], "url": "https://v/a?xtags=acont%3Doriginal%3Alang%3Den-US"],
+        ]
+      ]
+    ]
+    #expect(AudioTrack.preferred(in: json) == AudioTrack(id: "en-US.4", languageTag: "en-US"))
+  }
+
+  /// Several unmarked renditions: guessing is what produced the wrong language, so choose none.
+  @Test func unmarkedAlternativesYieldNoChoice() {
+    let ambiguous: JSONValue = [
+      "streamingData": [
+        "adaptiveFormats": [
+          ["audioTrack": ["id": "es.3"]],
+          ["audioTrack": ["id": "en-US.4"]],
+        ]
+      ]
+    ]
+    #expect(AudioTrack.preferred(in: ambiguous) == nil)
+    let single: JSONValue = ["streamingData": ["adaptiveFormats": [["audioTrack": ["id": "en-US.4"]]]]]
+    #expect(AudioTrack.preferred(in: single) == AudioTrack(id: "en-US.4", languageTag: "en-US"))
+    #expect(AudioTrack.preferred(in: ["playabilityStatus": ["status": "OK"]]) == nil)
+  }
+
+  @Test func trackIDLanguageTagDropsTheCounter() {
+    #expect(AudioTrack.languageTag(fromTrackID: "en-US.4") == "en-US")
+    #expect(AudioTrack.languageTag(fromTrackID: "es-419.4") == "es-419")
+    #expect(AudioTrack.languageTag(fromTrackID: "en-US") == "en-US")
+    #expect(AudioTrack.languageTag(fromTrackID: ".4") == nil)
+  }
+
+  /// HLS `LANGUAGE` and the track id need not be identical (`en-US` vs `en`); match exact first.
+  @Test func renditionMatchingPrefersExactTagThenLanguage() {
+    let track = AudioTrack(id: "en-US.4", languageTag: "en-US")
+    #expect(track.preferredRenditionIndex(in: [nil, "ar", "en-US", "en"]) == 2)
+    #expect(track.preferredRenditionIndex(in: ["es-419", "en"]) == 1)
+    #expect(AudioTrack(id: "en_US.4", languageTag: "en_US").preferredRenditionIndex(in: [nil, "en-us"]) == 1)
+    #expect(track.preferredRenditionIndex(in: [nil, "de"]) == nil)
+  }
+
+  @Test func resolutionCarriesTheOriginalAudioTrack() async throws {
+    let json: JSONValue = [
+      "playabilityStatus": ["status": "OK"],
+      "streamingData": [
+        "hlsManifestUrl": "https://manifest.googlevideo.com/variant",
+        "adaptiveFormats": [
+          ["audioTrack": ["id": "es.3", "audioIsDefault": false]],
+          ["audioTrack": ["id": "en-US.4", "audioIsDefault": true]],
+        ],
+      ],
+    ]
+    let spy = SpyTransport(body: try json.encoded())
+    let resolution = await StreamResolver(client: try makeClient(spy), catalog: try testCatalog())
+      .resolveDetailed(videoID: "v")
+    #expect(resolution.audioTrack == AudioTrack(id: "en-US.4", languageTag: "en-US"))
+  }
 }

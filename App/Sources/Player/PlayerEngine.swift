@@ -76,6 +76,9 @@ final class PlayerEngine {
   @ObservationIgnored private var standby: Standby?
   @ObservationIgnored private var standbyID: UUID?
   @ObservationIgnored private var currentAsset: AVURLAsset?
+  /// The stream's own audio rendition; selected explicitly because the HLS manifest marks every
+  /// rendition `DEFAULT=NO` and AVFoundation may otherwise start on a dub.
+  @ObservationIgnored private var audioTrack: AudioTrack?
   @ObservationIgnored private var forwardBufferLimit: Double?
 
   init() {
@@ -98,7 +101,10 @@ final class PlayerEngine {
 
   // MARK: Loading
 
-  func load(_ source: PlaybackSource, startAt: Double, autoplay: Bool = true, quality: QualityCap, pipAutoStart: Bool) {
+  func load(
+    _ source: PlaybackSource, startAt: Double, autoplay: Bool = true, quality: QualityCap, pipAutoStart: Bool,
+    audioTrack: AudioTrack?
+  ) {
     tearDownItem()
     discardStandby()
     forwardBufferLimit = nil
@@ -115,6 +121,7 @@ final class PlayerEngine {
     duration = 0
     pendingStart = startAt
     pendingAutoplay = autoplay
+    self.audioTrack = audioTrack
     let asset = AVURLAsset(url: url)
     currentAsset = asset
     let item = AVPlayerItem(asset: asset)
@@ -137,6 +144,7 @@ final class PlayerEngine {
     tearDownItem()
     discardStandby()
     currentAsset = nil
+    audioTrack = nil
     player.replaceCurrentItem(with: nil)
     surface.tearDownPictureInPicture()
     status = .idle
@@ -230,6 +238,7 @@ final class PlayerEngine {
     item.audioTimePitchAlgorithm = .timeDomain
     item.preferredForwardBufferDuration = 8
     applyQuality(to: item)
+    selectAudioTrack(on: item)
     let standbyPlayer = AVPlayer(playerItem: item)
     Self.configure(standbyPlayer)
     standbyPlayer.isMuted = true
@@ -368,15 +377,6 @@ final class PlayerEngine {
     }
   }
 
-  /// Turns off any subtitle/CC rendition the stream carries.
-  private func disableNativeSubtitles(_ item: AVPlayerItem) {
-    let asset = item.asset
-    Task {
-      guard let group = try? await asset.loadMediaSelectionGroup(for: .legible) else { return }
-      item.select(nil, in: group)
-    }
-  }
-
   private func bind(_ player: AVPlayer) {
     playerObservations = [player.observe(\.timeControlStatus, options: [.initial, .new]) { @Sendable [weak self] player, _ in
       let status = player.timeControlStatus
@@ -439,18 +439,50 @@ final class PlayerEngine {
     switch itemStatus {
     case .readyToPlay:
       guard status == .loading else { return }
+      startPlayback()
+    case .failed:
+      fail(message ?? "The video could not be played")
+    default:
+      break
+    }
+  }
+
+  /// Selection groups are loaded before the first frame so a dub is never heard: the HLS
+  /// manifest marks every audio rendition `DEFAULT=NO`, so AVFoundation's own pick is arbitrary.
+  private func startPlayback() {
+    guard let item = player.currentItem else { return }
+    let audioTrack = audioTrack
+    Task { @MainActor in
+      await Self.applyMediaSelection(to: item, audioTrack: audioTrack)
+      guard player.currentItem === item, status == .loading else { return }
       loadWatchdog?.cancel()
       status = .ready
-      if let item = player.currentItem { disableNativeSubtitles(item) }
       if pendingStart > 0 {
         seek(to: pendingStart)
         pendingStart = 0
       }
       if pendingAutoplay { play() }
-    case .failed:
-      fail(message ?? "The video could not be played")
-    default:
-      break
+    }
+  }
+
+  /// Fire-and-forget for the muted standby, which has time to spare before it is swapped in.
+  private func selectAudioTrack(on item: AVPlayerItem) {
+    let audioTrack = audioTrack
+    Task { @MainActor in await Self.applyMediaSelection(to: item, audioTrack: audioTrack) }
+  }
+
+  /// Clears the stream's own captions and selects its audio rendition.
+  private static func applyMediaSelection(to item: AVPlayerItem, audioTrack: AudioTrack?) async {
+    let asset = item.asset
+    if let audioTrack, let audible = try? await asset.loadMediaSelectionGroup(for: .audible) {
+      let tags = audible.options.map { $0.extendedLanguageTag ?? $0.locale?.identifier }
+      if let index = audioTrack.preferredRenditionIndex(in: tags) {
+        item.select(audible.options[index], in: audible)
+      }
+    }
+    // Captions are drawn by CaptionOverlay; AVPlayer must not also render a legible track.
+    if let legible = try? await asset.loadMediaSelectionGroup(for: .legible) {
+      item.select(nil, in: legible)
     }
   }
 
