@@ -66,7 +66,7 @@ final class FeedModel {
       error = "Session expired — sign in again"
     } catch {
       // A refresh that fails keeps the last good page on screen; the banner above it says why.
-      error = Self.describe(error)
+      self.error = Self.describe(error)
     }
   }
 
