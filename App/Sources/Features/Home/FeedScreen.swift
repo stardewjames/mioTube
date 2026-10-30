@@ -59,10 +59,11 @@ final class FeedModel {
     isLoading = page == nil
     isRefreshing = page != nil
     defer {
-      guard token == generation else { return }
-      isLoading = false
-      isRefreshing = false
-      isFetching = false
+      if token == generation {
+        isLoading = false
+        isRefreshing = false
+        isFetching = false
+      }
     }
     do {
       let fresh = try await env.feedLoader.load(key, forceRefresh: true)
