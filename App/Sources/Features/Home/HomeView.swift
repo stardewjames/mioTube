@@ -6,7 +6,8 @@ struct HomeView: View {
   @State private var model = FeedModel(key: .home)
 
   var body: some View {
-    NavigationStack {
+    @Bindable var env = env
+    NavigationStack(path: $env.homePath) {
       FeedScrollView(model: model) {
         if env.account.state == .expired {
           SessionExpiredBanner()

@@ -78,6 +78,11 @@ struct VideoSurface: View {
       PlayerOverlay()
     }
     .clipped()
+    // The controls float over dark video content, so one scheme serves every element —
+    // glass capsules, labels, toasts and menus all resolve together. Without this they
+    // followed the app appearance: fixed `.white` titles beside adaptive `.primary`
+    // (black) toasts and buttons in light mode.
+    .environment(\.colorScheme, .dark)
   }
 }
 

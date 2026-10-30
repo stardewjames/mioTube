@@ -9,6 +9,7 @@ struct WatchInfoPanel: View {
   @State private var subscribedOverride: Bool?
   @State private var actionError: String?
   @State private var showingPlaylists = false
+  @State private var draggedQueueID: QueueItem.ID?
 
   private var coordinator: PlaybackCoordinator { env.coordinator }
 
@@ -209,6 +210,8 @@ struct WatchInfoPanel: View {
         ForEach(queued) { item in
           Button { coordinator.jump(to: item) } label: { VideoRow(video: item.video) }
             .buttonStyle(.plain)
+            .modifier(SwipeToRemove { coordinator.removeFromQueue(item.id) })
+            .queueReorder(id: item.id, dragged: $draggedQueueID, coordinator: coordinator)
         }
       }
       if !info.related.isEmpty {

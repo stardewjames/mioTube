@@ -51,6 +51,9 @@ final class AppEnvironment {
   let coordinator: PlaybackCoordinator
   /// Bumped when the account changes so feeds reload.
   private(set) var sessionRevision = 0
+  /// Home tab's navigation stack. Deep-linked playlists/channels are appended here;
+  /// `RootView` switches to the Home tab whenever it changes.
+  var homePath: [Route] = []
 
   private init() {
     guard let catalog = try? ProfileCatalog.bundled() else {
@@ -93,6 +96,35 @@ final class AppEnvironment {
     coordinator.activateRemoteCommands()
     Task { await account.restore() }
     Task { _ = await configProvider.config() }
+  }
+
+  /// Opens a YouTube link handed to the app (`youtube://` deep link or web URL).
+  /// Returns false when the URL isn't a YouTube link.
+  @discardableResult
+  func open(_ url: URL) -> Bool {
+    guard let link = YouTubeLink(url: url) else { return false }
+    open(link)
+    return true
+  }
+
+  /// Videos play immediately; playlists and channels are pushed onto the Home
+  /// tab's stack (`homePath`), which `RootView` switches into view.
+  func open(_ link: YouTubeLink) {
+    switch link {
+    case .video(let id):
+      // Placeholder summary: the watch screen fills in title/channel from the `next` response.
+      coordinator.play(VideoSummary(
+        videoID: id, title: "", channelID: "", channelName: "", thumbnailURL: nil,
+        durationSeconds: nil, viewCountText: nil, publishedText: nil, isLive: false, isUpcoming: false
+      ))
+      // No feed card for this video is registered in the zoom namespace, so retarget the
+      // transition to the mini player — the same source the mini-player tap opens from.
+      coordinator.watchZoomSource = PlaybackCoordinator.miniPlayerZoomID
+    case .playlist(let id):
+      homePath.append(.playlist(id: id, title: ""))
+    case .channel(let id):
+      homePath.append(.channel(id: id, title: id.hasPrefix("@") ? id : ""))
+    }
   }
 }
 

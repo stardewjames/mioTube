@@ -58,6 +58,17 @@ struct RootView: View {
     .sheet(isPresented: $account.isPresentingSignIn) {
       SignInSheet().environment(env)
     }
+    // URLs from outside the app: `youtube://…` deep links and web URLs.
+    .onOpenURL { url in
+      env.open(url)
+    }
+    .onChange(of: env.homePath) { _, path in
+      guard !path.isEmpty else { return }
+      // Playlist/channel links push onto the Home stack, so make it visible —
+      // and minimize an open player (keeps playing in the mini player) so it isn't covered.
+      tab = .home
+      if env.coordinator.isWatchPresented { env.coordinator.isWatchPresented = false }
+    }
   }
 }
 

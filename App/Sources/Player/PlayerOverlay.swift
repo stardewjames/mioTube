@@ -62,7 +62,6 @@ struct PlayerOverlay: View {
               .onEnded { value in doubleTap(forward: value.location.x > proxy.size.width / 2) }
               .exclusively(before: TapGesture().onEnded { toggleControls() })
           )
-          .simultaneousGesture(DragGesture(minimumDistance: 24).onEnded(swipe))
 
         if let seekHUD {
           HStack {
@@ -91,7 +90,11 @@ struct PlayerOverlay: View {
             .allowsHitTesting(false)
         }
       }
+      // The swipe has to start from the whole overlay, not the background layer below the
+      // controls: the transport buttons and the scrubber cover much of the surface, and a swipe
+      // beginning on one of them never reaches the background's gesture.
       .overlay(alignment: .top) { sponsorToast }
+      .simultaneousGesture(DragGesture(minimumDistance: 24).onEnded(swipe))
     }
     .animation(.easeInOut(duration: 0.2), value: controlsVisible)
     .animation(.easeInOut(duration: 0.2), value: seekHUD)
@@ -386,9 +389,17 @@ struct PlayerOverlay: View {
   /// the player when inline. Short flicks count via the predicted end translation.
   private func swipe(_ value: DragGesture.Value) {
     let dy = value.translation.height
+    let dx = value.translation.width
     let predicted = value.predictedEndTranslation.height
-    guard abs(dy) > abs(value.translation.width) * 1.5, abs(dy) > 40 || abs(predicted) > 120 else { return }
-    if dy < 0 {
+    // A flick's translation can still be short when the finger lifts; use the predicted endpoint
+    // when it is the larger movement, but only in the direction the drag already points.
+    let flick = dy < 0 ? min(predicted, 0) : max(predicted, 0)
+    let distance = max(abs(dy), abs(flick))
+    // Vertical-dominant is enough; a diagonal thumb swipe still exits. Horizontal scrubbing has a
+    // larger dx, so it never triggers this.
+    guard abs(dy) > abs(dx), distance > 36 else { return }
+    let direction = abs(dy) >= abs(flick) ? dy : flick
+    if direction < 0 {
       if !coordinator.isFullscreen { coordinator.isFullscreen = true }
     } else if coordinator.isFullscreen {
       coordinator.isFullscreen = false

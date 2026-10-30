@@ -415,10 +415,11 @@ final class PlayerEngine {
   }
 
   private func observe(_ item: AVPlayerItem) {
+    let id = ObjectIdentifier(item)
     itemObservations.append(item.observe(\.status, options: [.new]) { @Sendable [weak self] item, _ in
       let status = item.status
       let message = item.error?.localizedDescription
-      Task { @MainActor in self?.itemStatusChanged(status, message: message) }
+      Task { @MainActor in self?.itemStatusChanged(id, status, message: message) }
     })
     let center = NotificationCenter.default
     itemNotificationTokens.append(center.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification, object: item, queue: .main) { @Sendable [weak self] _ in
@@ -435,7 +436,9 @@ final class PlayerEngine {
     })
   }
 
-  private func itemStatusChanged(_ itemStatus: AVPlayerItem.Status, message: String?) {
+  private func itemStatusChanged(_ item: ObjectIdentifier, _ itemStatus: AVPlayerItem.Status, message: String?) {
+    // Callbacks hop to the main actor asynchronously; one queued by a replaced item must not fail the new one.
+    guard let loaded = player.currentItem, ObjectIdentifier(loaded) == item else { return }
     switch itemStatus {
     case .readyToPlay:
       guard status == .loading else { return }

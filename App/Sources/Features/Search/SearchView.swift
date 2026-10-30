@@ -75,6 +75,11 @@ struct SearchView: View {
   private func run(_ text: String, filter: SearchFilter?) {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return }
+    // A YouTube link pasted into search opens the target instead of searching for it.
+    if let link = YouTubeLink(string: trimmed) {
+      env.open(link)
+      return
+    }
     if trimmed != submitted { baseChips = [] }
     submitted = trimmed
     self.filter = filter

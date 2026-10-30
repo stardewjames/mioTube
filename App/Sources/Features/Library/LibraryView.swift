@@ -3,6 +3,7 @@ import SwiftUI
 
 struct LibraryView: View {
   @Environment(AppEnvironment.self) private var env
+  @State private var draggedQueueID: QueueItem.ID?
 
   var body: some View {
     NavigationStack {
@@ -41,6 +42,16 @@ struct LibraryView: View {
                 VideoRow(video: item.video)
               }
               .buttonStyle(.plain)
+              .queueReorder(id: item.id, dragged: $draggedQueueID, coordinator: env.coordinator)
+              .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                if item.id != env.coordinator.current?.id {
+                  Button(role: .destructive) {
+                    env.coordinator.removeFromQueue(item.id)
+                  } label: {
+                    Label("Remove", systemImage: "trash")
+                  }
+                }
+              }
             }
           }
         }

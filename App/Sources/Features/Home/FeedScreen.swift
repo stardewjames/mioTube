@@ -28,6 +28,8 @@ final class FeedModel {
   private(set) var reachedEnd = false
   @ObservationIgnored private var loadedRevision = -1
   @ObservationIgnored private var isFetching = false
+  /// Bumped for every accepted load; a response whose token is stale must not touch the model.
+  @ObservationIgnored private var generation = 0
 
   init(key: FeedKey) {
     self.key = key
@@ -41,37 +43,49 @@ final class FeedModel {
       page = cached
       reachedEnd = cached.continuation == nil
     }
+    // A reload must never be dropped because an automatic load happens to be in flight; it
+    // supersedes that request (see `fetch`) instead of racing it.
     guard force || !isFetching else { return }
     await fetch(env, force: force)
   }
 
   private func fetch(_ env: AppEnvironment, force: Bool) async {
+    generation &+= 1
+    let token = generation
     if force || loadedRevision != env.sessionRevision { reachedEnd = false }
     loadedRevision = env.sessionRevision
     isFetching = true
-    if page == nil { isLoading = true } else { isRefreshing = true }
+    // Reset both rather than setting one: a superseded load may have left the other set.
+    isLoading = page == nil
+    isRefreshing = page != nil
     defer {
+      guard token == generation else { return }
       isLoading = false
       isRefreshing = false
       isFetching = false
     }
     do {
       let fresh = try await env.feedLoader.load(key, forceRefresh: true)
+      // An older request finishing after a newer one must not overwrite the newer page.
+      guard token == generation else { return }
       page = fresh
       error = nil
       reachedEnd = fresh.continuation == nil
       env.diagnostics.record(feed: key, droppedAds: fresh.droppedAds)
     } catch MioTubeError.unauthorized {
+      guard token == generation else { return }
       env.account.markExpired()
       error = "Session expired — sign in again"
     } catch {
+      guard token == generation else { return }
       // A refresh that fails keeps the last good page on screen; the banner above it says why.
       self.error = Self.describe(error)
     }
   }
 
   func loadMore(_ env: AppEnvironment) async {
-    guard !isLoadingMore, !reachedEnd, page?.continuation != nil else { return }
+    guard !isLoadingMore, !isFetching, !reachedEnd, page?.continuation != nil else { return }
+    let token = generation
     isLoadingMore = true
     defer { isLoadingMore = false }
     do {
@@ -79,10 +93,13 @@ final class FeedModel {
         reachedEnd = true
         return
       }
+      // A reload started while this page was being fetched; its fresh first page wins.
+      guard token == generation else { return }
       env.diagnostics.record(feed: key, droppedAds: next.droppedAds)
       page = await env.feedLoader.cached(key)
       reachedEnd = next.continuation == nil || next.items.isEmpty
     } catch {
+      guard token == generation else { return }
       reachedEnd = true
     }
   }
@@ -149,13 +166,14 @@ struct FeedScrollView<Header: View>: View {
         Button {
           Task { await model.load(env, force: true) }
         } label: {
-          if model.isRefreshing {
+          if model.isLoading || model.isRefreshing {
             ProgressView().controlSize(.small)
           } else {
             Image(systemName: "arrow.clockwise")
           }
         }
-        .disabled(model.isRefreshing)
+        // The spinner shows a request is in flight. A tap while it runs still forces a fresh one
+        // (see `FeedModel.fetch`), so the button always responds instead of silently doing nothing.
         .accessibilityLabel("Reload")
       }
     }
@@ -264,19 +282,26 @@ struct ZoomSource: ViewModifier {
   }
 }
 
+/// Destination view for a pushed `Route`, shared by `navigationDestination(for:)` and deep links.
+struct RouteDestinationView: View {
+  let route: Route
+
+  var body: some View {
+    switch route {
+    case .channel(let id, let title): ChannelView(channelID: id, title: title)
+    case .playlist(let id, let title): PlaylistView(playlistID: id, title: title)
+    case .feed(let key, let title): FeedScreen(key: key, title: title, style: .list)
+    case .settings: SettingsView()
+    case .diagnostics: DiagnosticsView()
+    case .pasteCookies: PasteCookiesView()
+    }
+  }
+}
+
 /// Shared navigation destinations for every tab's stack.
 struct RouteDestinations: ViewModifier {
   func body(content: Content) -> some View {
-    content.navigationDestination(for: Route.self) { route in
-      switch route {
-      case .channel(let id, let title): ChannelView(channelID: id, title: title)
-      case .playlist(let id, let title): PlaylistView(playlistID: id, title: title)
-      case .feed(let key, let title): FeedScreen(key: key, title: title, style: .list)
-      case .settings: SettingsView()
-      case .diagnostics: DiagnosticsView()
-      case .pasteCookies: PasteCookiesView()
-      }
-    }
+    content.navigationDestination(for: Route.self) { RouteDestinationView(route: $0) }
   }
 }
 

@@ -164,6 +164,25 @@ final class PlaybackCoordinator {
     queue.insert(QueueItem(video: video), at: index + 1)
   }
 
+  /// Removes an entry from the queue. The playing entry can't be removed; `close()` ends playback instead.
+  func removeFromQueue(_ id: QueueItem.ID) {
+    guard let position = queue.firstIndex(where: { $0.id == id }), position != index else { return }
+    queue.remove(at: position)
+    if position < index { index -= 1 }
+  }
+
+  /// Moves `id` to `target`'s slot (after it when moving down). `index` keeps pointing at the playing entry.
+  func moveQueueItem(_ id: QueueItem.ID, onto target: QueueItem.ID) {
+    guard id != target,
+          let from = queue.firstIndex(where: { $0.id == id }),
+          let to = queue.firstIndex(where: { $0.id == target }) else { return }
+    let playingID = current?.id
+    let moved = queue.remove(at: from)
+    let landing = queue.firstIndex(where: { $0.id == target }) ?? from
+    queue.insert(moved, at: from < to ? landing + 1 : landing)
+    if let playingID, let now = queue.firstIndex(where: { $0.id == playingID }) { index = now }
+  }
+
   func advance(_ reason: AdvanceReason) {
     if reason == .automatic, repeatMode == .one {
       engine.seek(to: 0)
@@ -218,8 +237,7 @@ final class PlaybackCoordinator {
 
   func retry() {
     failure = nil
-    if let id = current?.video.videoID { Task { await resolver.invalidate(videoID: id) } }
-    startCurrent()
+    startCurrent(invalidatingCache: true)
   }
 
   func toggleMute() {
@@ -367,7 +385,7 @@ final class PlaybackCoordinator {
     }
   }
 
-  private func startCurrent() {
+  private func startCurrent(invalidatingCache: Bool = false) {
     loadTask?.cancel()
     guard let item = current else { return }
     resetPerVideoState()
@@ -382,6 +400,7 @@ final class PlaybackCoordinator {
     let client = client
 
     loadTask = Task {
+      if invalidatingCache { await resolver.invalidate(videoID: videoID) }
       // `next` and SponsorBlock don't depend on the stream; fetch them alongside resolution so
       // the info panel fills in even when playback fails.
       async let nextJSON = try? client.post("next", ["videoId": .string(videoID)])
