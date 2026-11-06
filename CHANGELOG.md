@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.1 - 2026-11-05
 
 - Audited every outbound request family against current public YouTube responses, captured official WEB traffic, and pinned yt-dlp/YouTube.js implementations. See [API contract audit](API_AUDIT.md) for coverage, verification, deliberate compatibility differences, and authenticated/device verification gaps.
 - Corrected client identity and account handling: preserve complete bootstrap versions and endpoint context, separate HTTP/context user agents, scope bootstrap and playback caches to the account, support SAPISID-family signing variants, and retain observed account/channel routing without inventing defaults.
