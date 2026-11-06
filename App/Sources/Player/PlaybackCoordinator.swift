@@ -58,6 +58,7 @@ final class PlaybackCoordinator {
   /// Drives the "playback unavailable" sheet.
   var failure: PlaybackFailure?
   private(set) var lastResolution: Resolution?
+  private(set) var historyError: String?
 
   // SponsorBlock
   private(set) var sponsorSegments: [SponsorSegment] = []
@@ -69,15 +70,19 @@ final class PlaybackCoordinator {
   private(set) var selectedCaption: CaptionTrack?
   private(set) var currentCaption: String?
   private(set) var isLoadingCaptions = false
+  private(set) var captionError: String?
 
   private(set) var quality: QualityCap = .auto
 
   @ObservationIgnored private let resolver: StreamResolver
   @ObservationIgnored private let client: InnertubeClient
+  @ObservationIgnored private let historyRecorder: WatchHistoryRecorder
+  @ObservationIgnored private var recordedHistoryForCurrent = false
   @ObservationIgnored private let sponsorBlock: SponsorBlockClient
   @ObservationIgnored private let transport: any HTTPTransport
   @ObservationIgnored private let settings: Settings
   @ObservationIgnored private let progress: WatchProgressStore
+  @ObservationIgnored private let watchProgress: WatchProgressIndex
   @ObservationIgnored private let images: ImagePipeline
   @ObservationIgnored private let nowPlaying = NowPlayingCenter()
   @ObservationIgnored private var loadTask: Task<Void, Never>?
@@ -86,15 +91,19 @@ final class PlaybackCoordinator {
   @ObservationIgnored private var skipConfig: SkipConfig?
   @ObservationIgnored private var suppressedSegments: [SponsorSegment] = []
   @ObservationIgnored private var captions: Captions?
+  @ObservationIgnored private var captionsTask: Task<Void, Never>?
   @ObservationIgnored private var pendingPiPRestore: ((Bool) -> Void)?
   @ObservationIgnored private var lastSkip: (uuid: String, at: Date)?
   /// Profiles whose stream failed in AVPlayer for the current video, with the reasons.
   @ObservationIgnored private var failedProfiles: Set<String> = []
+  /// Same-profile source to retry once before abandoning the profile.
+  @ObservationIgnored private var pendingFallback: PlaybackSource?
   @ObservationIgnored private var playerFailureReasons: [PlaybackFailure.Reason] = []
   @ObservationIgnored private var fallbackTask: Task<Void, Never>?
   @ObservationIgnored private var restoreFromPiPWhenActive = false
   @ObservationIgnored private var lastProgressSave: Date = .distantPast
   @ObservationIgnored private var lifecycleTokens: [any NSObjectProtocol] = []
+  @ObservationIgnored private var watchNext: JSONValue?
 
   nonisolated private struct SkipConfig: Equatable {
     var enabled: Set<SponsorCategory>
@@ -104,14 +113,16 @@ final class PlaybackCoordinator {
 
   init(
     resolver: StreamResolver, client: InnertubeClient, sponsorBlock: SponsorBlockClient, transport: any HTTPTransport,
-    settings: Settings, progress: WatchProgressStore, images: ImagePipeline
+    settings: Settings, progress: WatchProgressStore, watchProgress: WatchProgressIndex, images: ImagePipeline
   ) {
     self.resolver = resolver
     self.client = client
+    historyRecorder = WatchHistoryRecorder(client: client)
     self.sponsorBlock = sponsorBlock
     self.transport = transport
     self.settings = settings
     self.progress = progress
+    self.watchProgress = watchProgress
     self.images = images
     quality = settings.defaultQuality
     engine.rate = Float(settings.defaultSpeed)
@@ -185,7 +196,7 @@ final class PlaybackCoordinator {
 
   func advance(_ reason: AdvanceReason) {
     if reason == .automatic, repeatMode == .one {
-      engine.seek(to: 0)
+      if info?.isLive == true { engine.goLive() } else { engine.seek(to: 0) }
       engine.play()
       return
     }
@@ -205,7 +216,9 @@ final class PlaybackCoordinator {
   }
 
   func previous() {
-    if engine.position > 5 || index == 0 {
+    if info?.isLive == true {
+      guard index > 0 else { return }
+    } else if engine.position > 5 || index == 0 {
       engine.seek(to: 0)
       return
     }
@@ -240,6 +253,17 @@ final class PlaybackCoordinator {
     startCurrent(invalidatingCache: true)
   }
 
+  func accountDidChange() {
+    let position = engine.position
+    let autoplay = engine.isPlaying
+    saveProgress(force: true)
+    recordedHistoryForCurrent = false
+    historyError = nil
+    if current != nil {
+      startCurrent(invalidatingCache: true, startAt: position, autoplay: autoplay)
+    }
+  }
+
   func toggleMute() {
     engine.setMuted(!engine.isMuted)
     skipEngine?.userToggledMute()
@@ -263,30 +287,34 @@ final class PlaybackCoordinator {
   }
 
   func selectCaption(_ track: CaptionTrack?) {
+    captionsTask?.cancel()
     selectedCaption = track
     captions = nil
     currentCaption = nil
+    captionError = nil
+    isLoadingCaptions = false
     guard let track else { return }
     settings.preferredCaptionLanguage = track.languageCode
     isLoadingCaptions = true
     let transport = transport
-    Task {
-      let loaded = await CaptionsParser.fetch(track, transport: transport)
-      guard selectedCaption == track else { return }
-      isLoadingCaptions = false
-      if let loaded {
+    captionsTask = Task {
+      do {
+        let loaded = try await CaptionsParser.fetch(track, transport: transport)
+        guard !Task.isCancelled, selectedCaption == track else { return }
+        isLoadingCaptions = false
         captions = loaded
         currentCaption = loaded.cue(at: engine.position)?.text
-      } else {
-        // Unavailable (403/empty): hide the entry rather than retrying.
-        captionTracks.removeAll { $0 == track }
+      } catch {
+        guard !Task.isCancelled, selectedCaption == track else { return }
+        isLoadingCaptions = false
         selectedCaption = nil
+        captionError = "Captions unavailable: \(FeedModel.describe(error))"
       }
     }
   }
 
   var currentChapter: Chapter? {
-    guard let chapters = info?.chapters, !chapters.isEmpty else { return nil }
+    guard info?.isLive != true, let chapters = info?.chapters, !chapters.isEmpty else { return nil }
     return chapters.last { $0.startSeconds <= engine.position }
   }
 
@@ -295,6 +323,7 @@ final class PlaybackCoordinator {
   /// Segments drawn on the scrubber: skip/mute ranges and highlights in enabled categories
   /// (plus the Diagnostics test segment).
   var scrubberSegments: [SponsorSegment] {
+    guard info?.isLive != true else { return [] }
     var segments = sponsorSegments
     if settings.forceTestSponsorSegment { segments.append(Self.testSegment) }
     let enabled = settings.activeSponsorCategories
@@ -322,6 +351,7 @@ final class PlaybackCoordinator {
   }
 
   func skip(_ segment: SponsorSegment) {
+    guard info?.isLive != true else { return }
     if segment.action == .poi { engine.seek(to: segment.start) } else { engine.jumpOverSegment(to: segment.end) }
   }
 
@@ -333,31 +363,58 @@ final class PlaybackCoordinator {
   }
 
   private func resetPerVideoState() {
+    recordedHistoryForCurrent = false
     sponsorSegments = []
+    watchNext = nil
     fullVideoSponsored = false
     sponsorToast = nil
     skipEngine = nil
     skipConfig = nil
     suppressedSegments = []
+    captionsTask?.cancel()
     captionTracks = []
     selectedCaption = nil
     captions = nil
     currentCaption = nil
+    isLoadingCaptions = false
+    captionError = nil
     failure = nil
     fallbackTask?.cancel()
     failedProfiles = []
+    pendingFallback = nil
     playerFailureReasons = []
     lastSkip = nil
   }
 
-  /// A resolved stream would not play (e.g. it needs a JS transform or PO token): re-resolve
-  /// with that profile excluded and resume at the same position.
+  /// A resolved stream would not play (e.g. it needs a JS transform or PO token): try that
+  /// profile's muxed rendition first, then re-resolve with the profile excluded and resume at
+  /// the same position.
   private func streamFailed(_ message: String) {
     guard phase == .playing, let item = current, let profile = lastResolution?.profileID else { return }
-    failedProfiles.insert(profile)
-    playerFailureReasons.append(.init(profile: profile, reason: "player: \(message)"))
-    phase = .resolving
     let position = engine.position
+    let failedSource = lastResolution?.source
+    playerFailureReasons.append(.init(profile: profile, reason: "player: \(message)"))
+    if let fallback = pendingFallback, fallback.url != nil {
+      pendingFallback = nil
+      let videoID = item.video.videoID
+      let resolver = resolver
+      if let failedSource {
+        Task { await resolver.promoteFallback(videoID: videoID, matching: failedSource) }
+      }
+      let audioTrack = lastResolution?.audioTrack
+      lastResolution = Resolution(
+        source: fallback, fallback: nil, player: lastResolution?.player, profileID: profile,
+        audioTrack: audioTrack, probes: lastResolution?.probes ?? []
+      )
+      engine.load(
+        fallback, startAt: position, quality: quality, pipAutoStart: settings.pipAutoStart,
+        audioTrack: audioTrack, isLive: info?.isLive == true,
+        allowsLiveSeeking: lastResolution?.player?["videoDetails", "isLiveDvrEnabled"]?.bool ?? true
+      )
+      return
+    }
+    failedProfiles.insert(profile)
+    phase = .resolving
     let excluded = failedProfiles
     let videoID = item.video.videoID
     let maxHeight = quality.maxHeight
@@ -377,15 +434,18 @@ final class PlaybackCoordinator {
         return
       }
       lastResolution = resolution
+      pendingFallback = resolution.fallback
+      applyWatchInfo(player: resolution.player, preservingLiveState: true)
       engine.load(
         resolution.source, startAt: position, quality: quality, pipAutoStart: settings.pipAutoStart,
-        audioTrack: resolution.audioTrack
+        audioTrack: resolution.audioTrack, isLive: info?.isLive == true,
+        allowsLiveSeeking: resolution.player?["videoDetails", "isLiveDvrEnabled"]?.bool ?? true
       )
       phase = .playing
     }
   }
 
-  private func startCurrent(invalidatingCache: Bool = false) {
+  private func startCurrent(invalidatingCache: Bool = false, startAt: Double? = nil, autoplay: Bool = true) {
     loadTask?.cancel()
     guard let item = current else { return }
     resetPerVideoState()
@@ -409,16 +469,25 @@ final class PlaybackCoordinator {
         await resolver.resolveDetailed(videoID: videoID, maxHeight: maxHeight)
       }
       guard !Task.isCancelled, current?.id == item.id else { return }
+      watchNext = await nextJSON
+      guard !Task.isCancelled, current?.id == item.id else { return }
+      // Apply player flags even when `next` failed, before deciding whether VOD resume is safe.
+      applyWatchInfo(player: resolution?.player)
       if let resolution {
         lastResolution = resolution
+        pendingFallback = resolution.fallback
         if case .unavailable(let failure) = resolution.source {
           fail(failure)
         } else {
-          let resume = await progress.resumePosition(for: videoID)
+          var resume = 0.0
+          if info?.isLive != true {
+            if let startAt { resume = startAt } else { resume = await progress.resumePosition(for: videoID) }
+          }
           guard !Task.isCancelled, current?.id == item.id else { return }
           engine.load(
-            resolution.source, startAt: resume, quality: quality, pipAutoStart: settings.pipAutoStart,
-            audioTrack: resolution.audioTrack
+            resolution.source, startAt: resume, autoplay: autoplay, quality: quality, pipAutoStart: settings.pipAutoStart,
+            audioTrack: resolution.audioTrack, isLive: info?.isLive == true,
+            allowsLiveSeeking: resolution.player?["videoDetails", "isLiveDvrEnabled"]?.bool ?? true
           )
           phase = .playing
         }
@@ -426,22 +495,40 @@ final class PlaybackCoordinator {
         fail(PlaybackFailure(reasons: [.init(profile: "all", reason: "Timed out after 30 s")]))
       }
 
-      let (next, loadedSegments) = await (nextJSON, segments)
+      let loadedSegments = await segments
       guard !Task.isCancelled, current?.id == item.id else { return }
-      if let next {
-        let loadedInfo = WatchParser.parse(next: next, player: resolution?.player ?? .null, adFilter: .init())
-        info = loadedInfo
-        captionTracks = loadedInfo.captionTracks
-        AppEnvironment.shared.diagnostics.record(watchDroppedAds: loadedInfo.droppedAds)
-        if let preferred = settings.preferredCaptionLanguage, selectedCaption == nil,
-           let track = loadedInfo.captionTracks.first(where: { $0.languageCode == preferred && !$0.isAutomatic }) {
-          selectCaption(track)
-        }
-      }
-      sponsorSegments = loadedSegments
+      sponsorSegments = info?.isLive == true ? [] : loadedSegments
       rebuildSkipEngineIfNeeded(force: true)
       refreshNowPlaying()
     }
+  }
+
+  private func applyWatchInfo(player: JSONValue?, preservingLiveState: Bool = false) {
+    var loadedInfo = WatchParser.parse(next: watchNext ?? .null, player: player ?? .null, adFilter: .init())
+    if loadedInfo.videoID.isEmpty { loadedInfo.videoID = current?.video.videoID ?? "" }
+    if loadedInfo.title.isEmpty { loadedInfo.title = info?.title ?? "" }
+    if loadedInfo.channel == nil { loadedInfo.channel = info?.channel }
+    if watchNext == nil, player?["videoDetails"] == nil,
+       player?["microformat", "playerMicroformatRenderer", "liveBroadcastDetails", "isLiveNow"] == nil {
+      loadedInfo.isLive = info?.isLive ?? false
+    }
+    // Another profile may omit live flags; that must not turn this live session into a VOD
+    // resume using the previous profile's unrelated item-time coordinates.
+    if preservingLiveState, info?.isLive == true,
+       player?["videoDetails", "isLive"]?.bool == nil,
+       player?["microformat", "playerMicroformatRenderer", "liveBroadcastDetails", "isLiveNow"]?.bool == nil {
+      loadedInfo.isLive = true
+      loadedInfo.chapters = []
+    }
+    info = loadedInfo
+    captionTracks = loadedInfo.captionTracks
+    AppEnvironment.shared.diagnostics.record(watchDroppedAds: loadedInfo.droppedAds)
+    if let preferred = settings.preferredCaptionLanguage, selectedCaption == nil,
+       let track = loadedInfo.captionTracks.first(where: { $0.languageCode == preferred && !$0.isAutomatic }) {
+      selectCaption(track)
+    }
+    rebuildSkipEngineIfNeeded(force: true)
+    refreshNowPlaying()
   }
 
   private func fail(_ failure: PlaybackFailure) {
@@ -475,6 +562,14 @@ final class PlaybackCoordinator {
   static let testSegment = SponsorSegment(uuid: "miotube-test-segment", start: 10, end: 15, category: .sponsor, action: .skip, votes: 0)
 
   private func rebuildSkipEngineIfNeeded(force: Bool = false) {
+    guard info?.isLive != true else {
+      skipEngine = nil
+      skipConfig = nil
+      fullVideoSponsored = false
+      sponsorToast = nil
+      engine.limitForwardBuffer(nil)
+      return
+    }
     let config = SkipConfig(
       enabled: settings.activeSponsorCategories,
       overrides: settings.sponsorCategoryActions,
@@ -495,8 +590,9 @@ final class PlaybackCoordinator {
   }
 
   private func tick(_ position: Double) {
+    recordWatchHistoryIfNeeded(at: position)
     if skipEngine != nil || settings.forceTestSponsorSegment { rebuildSkipEngineIfNeeded() }
-    if var engineState = skipEngine, phase == .playing {
+    if var engineState = skipEngine, phase == .playing, info?.isLive != true {
       let decision = engineState.evaluate(position: position, muted: engine.isMuted)
       skipEngine = engineState
       switch decision {
@@ -570,16 +666,50 @@ final class PlaybackCoordinator {
 
   // MARK: Progress
 
+  private func recordWatchHistoryIfNeeded(at position: Double) {
+    let env = AppEnvironment.shared
+    guard !recordedHistoryForCurrent, phase == .playing, engine.status == .ready,
+          engine.isPlaying, !engine.isBuffering, position > 0,
+          env.account.isSignedIn, let item = current
+    else { return }
+    recordedHistoryForCurrent = true
+    let recorder = historyRecorder
+    let accountRevision = env.sessionRevision
+    // Let a real playback's write finish even if the user advances or closes the player.
+    Task { [weak self] in
+      do {
+        let session = await recorder.client.session.current()
+        guard env.sessionRevision == accountRevision, let session else { return }
+        try await recorder.record(videoID: item.video.videoID, position: position, session: session)
+        guard env.sessionRevision == accountRevision else { return }
+        await env.watchHistoryDidChange()
+        guard env.sessionRevision == accountRevision else { return }
+        self?.historyError = nil
+      } catch is CancellationError {
+        // The account changed while loading the authenticated history URL.
+      } catch {
+        guard env.sessionRevision == accountRevision else { return }
+        if let error = error as? MioTubeError, error == .unauthorized || error == .notSignedIn {
+          env.account.markExpired()
+          self?.historyError = "Sign in again to update your YouTube watch history."
+        } else {
+          self?.historyError = FeedModel.describe(error)
+        }
+      }
+    }
+  }
+
   private func saveProgress(force: Bool) {
-    guard let id = current?.video.videoID, engine.duration > 0, info?.isLive != true else { return }
+    guard phase == .playing, let id = current?.video.videoID, engine.duration > 0, info?.isLive != true else { return }
     let now = Date()
     guard force || now.timeIntervalSince(lastProgressSave) >= 5 else { return }
     lastProgressSave = now
     let position = engine.position
     let duration = engine.duration
+    watchProgress.record(videoID: id, position: position, duration: duration, at: now)
     let progress = progress
     Task {
-      await progress.record(videoID: id, position: position, duration: duration)
+      await progress.record(videoID: id, position: position, duration: duration, at: now)
       await progress.flush()
     }
   }
@@ -610,17 +740,17 @@ final class PlaybackCoordinator {
         return true
       },
       previous: { [weak self] in
-        guard let self, current != nil else { return false }
+        guard let self, current != nil, info?.isLive != true || hasPrevious else { return false }
         previous()
         return true
       },
       seek: { [weak self] seconds in
-        guard let self, current != nil else { return false }
+        guard let self, current != nil, info?.isLive != true, engine.canSeek else { return false }
         engine.seek(to: seconds)
         return true
       },
       skip: { [weak self] delta in
-        guard let self, current != nil else { return false }
+        guard let self, current != nil, engine.canSeek else { return false }
         engine.skip(by: delta)
         return true
       }
@@ -635,7 +765,8 @@ final class PlaybackCoordinator {
       duration: engine.duration,
       elapsed: engine.position,
       rate: engine.isPlaying ? engine.rate : 0,
-      isLive: info?.isLive ?? item.video.isLive
+      isLive: info?.isLive ?? item.video.isLive,
+      canSeek: engine.canSeek
     )
   }
 

@@ -19,6 +19,9 @@ actor ImagePipeline {
     let config = URLSessionConfiguration.default
     config.httpMaximumConnectionsPerHost = 6
     config.urlCache = nil
+    config.httpCookieStorage = nil
+    config.httpShouldSetCookies = false
+    config.httpCookieAcceptPolicy = .never
     session = URLSession(configuration: config)
     directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
       .appendingPathComponent("MioTube/images", isDirectory: true)

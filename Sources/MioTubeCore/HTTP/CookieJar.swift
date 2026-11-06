@@ -5,7 +5,7 @@ import Foundation
 public enum CookieJar {
   public struct Parsed: Sendable, Equatable {
     public var cookies: [String: String]
-    /// Earliest expiry found (Netscape format only).
+    /// Earliest expiry among the effective auth cookies (Netscape format only).
     public var earliestExpiry: Date?
 
     public init(cookies: [String: String], earliestExpiry: Date?) {
@@ -42,8 +42,7 @@ public enum CookieJar {
   /// `PREF`, …) would otherwise mark the session expired days before the Google login actually
   /// lapses, so only auth-cookie expiries are reported.
   static func parseNetscape(_ text: String) -> Parsed {
-    var cookies: [String: String] = [:]
-    var earliest: Date?
+    var selected: [String: (value: String, expiry: Date?)] = [:]
     for rawLine in text.split(whereSeparator: \.isNewline) {
       var line = Substring(rawLine)
       if line.hasPrefix("#HttpOnly_") { line = line.dropFirst("#HttpOnly_".count) }
@@ -51,16 +50,29 @@ public enum CookieJar {
       let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
       guard fields.count >= 7 else { continue }
       let domain = fields[0].lowercased()
-      guard domain.hasSuffix("youtube.com") || domain.hasSuffix("google.com") else { continue }
+      let youtube = GoogleSession.matchesDomain(domain, root: "youtube.com")
+      let google = GoogleSession.matchesDomain(domain, root: "google.com")
       let name = String(fields[5])
+      guard youtube || (google && GoogleSession.googleDomainCookieNames.contains(name)) else { continue }
+      // This jar is sent to www.youtube.com at /youtubei/...; do not flatten cookies
+      // scoped to another YouTube host or a different path into this request.
+      let host = domain.hasPrefix(".") ? String(domain.dropFirst()) : domain
+      if youtube {
+        let includesSubdomains = fields[1].uppercased() == "TRUE"
+        guard host == "www.youtube.com" || (host == "youtube.com" && includesSubdomains) else { continue }
+        guard fields[2] == "/" else { continue }
+      }
       let value = fields[6...].joined(separator: "\t").trimmingCharacters(in: .whitespacesAndNewlines)
-      // youtube.com rows win over google.com rows with the same name.
-      if cookies[name] == nil || domain.hasSuffix("youtube.com") { cookies[name] = value }
-      if let expiry = TimeInterval(fields[4]), expiry > 0, GoogleSession.authCookieNames.contains(name) {
-        let date = Date(timeIntervalSince1970: expiry)
-        earliest = earliest.map { min($0, date) } ?? date
+      let expiry = TimeInterval(fields[4]).flatMap { $0 > 0 ? Date(timeIntervalSince1970: $0) : nil }
+      // YouTube wins regardless of row order; a discarded Google copy cannot expire it.
+      if selected[name] == nil || youtube {
+        selected[name] = (value, expiry)
       }
     }
+    let cookies = selected.mapValues(\.value)
+    let earliest = selected.compactMap { name, row in
+      GoogleSession.authCookieNames.contains(name) ? row.expiry : nil
+    }.min()
     return Parsed(cookies: cookies, earliestExpiry: earliest)
   }
 

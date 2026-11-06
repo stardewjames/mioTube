@@ -4,6 +4,7 @@ import SwiftUI
 struct SearchView: View {
   @Environment(AppEnvironment.self) private var env
   @State private var query = ""
+  @State private var searchPresented = false
   @State private var submitted: String?
   @State private var filter: SearchFilter?
   @State private var suggestions: [String] = []
@@ -17,16 +18,34 @@ struct SearchView: View {
           FeedScrollView(model: model, style: .list) {
             chipBar
           }
-          .id(model.key)
+          .id(ObjectIdentifier(model))
+        } else if !env.searchHistory.queries.isEmpty {
+          recentSearches
         } else {
           ContentUnavailableView("Search YouTube", systemImage: "magnifyingglass", description: Text("No ads, no tracking pixels — just results."))
         }
       }
       .navigationTitle("Search")
-      .searchable(text: $query, prompt: "Videos, channels, playlists")
+      .searchable(text: $query, isPresented: $searchPresented, prompt: "Videos, channels, playlists")
       .searchSuggestions {
-        ForEach(suggestions, id: \.self) { suggestion in
-          Label(suggestion, systemImage: "magnifyingglass").searchCompletion(suggestion)
+        let recent = env.searchHistory.matching(query)
+        if !recent.isEmpty {
+          Section("Recent searches") {
+            ForEach(recent, id: \.self) { text in
+              recentSearch(text)
+            }
+            Button("Clear history", role: .destructive) { env.searchHistory.removeAll() }
+          }
+        }
+        let remote = suggestions.filter { suggestion in
+          !recent.contains { $0.caseInsensitiveCompare(suggestion) == .orderedSame }
+        }
+        if !remote.isEmpty {
+          Section("Suggestions") {
+            ForEach(remote, id: \.self) { suggestion in
+              Label(suggestion, systemImage: "magnifyingglass").searchCompletion(suggestion)
+            }
+          }
         }
       }
       .onSubmit(of: .search) { run(query, filter: nil) }
@@ -46,6 +65,44 @@ struct SearchView: View {
         if filter == nil, let chips, !chips.isEmpty { baseChips = chips }
       }
       .withRoutes()
+    }
+  }
+
+  private var recentSearches: some View {
+    List {
+      Section {
+        ForEach(env.searchHistory.queries, id: \.self) { text in
+          recentSearch(text)
+            .swipeActions {
+              Button("Delete", systemImage: "trash", role: .destructive) {
+                env.searchHistory.remove(text)
+              }
+            }
+        }
+      } header: {
+        HStack {
+          Text("Recent searches")
+          Spacer()
+          Button("Clear history", role: .destructive) { env.searchHistory.removeAll() }
+        }
+      } footer: {
+        Text("Saved on this device only.")
+      }
+    }
+    .listStyle(.plain)
+  }
+
+  private func recentSearch(_ text: String) -> some View {
+    Button {
+      query = text
+      run(text, filter: nil)
+    } label: {
+      Label(text, systemImage: "clock.arrow.circlepath")
+    }
+    .contextMenu {
+      Button("Remove from history", systemImage: "trash", role: .destructive) {
+        env.searchHistory.remove(text)
+      }
     }
   }
 
@@ -81,6 +138,9 @@ struct SearchView: View {
       return
     }
     if trimmed != submitted { baseChips = [] }
+    query = trimmed
+    searchPresented = false
+    if filter == nil { env.searchHistory.record(trimmed) }
     submitted = trimmed
     self.filter = filter
     suggestions = []

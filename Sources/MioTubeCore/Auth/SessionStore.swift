@@ -1,21 +1,38 @@
 import Foundation
 
-public struct GoogleSession: Codable, Sendable, Equatable {
+public struct GoogleSession: Codable, Sendable, Hashable {
   public var cookies: [String: String]
   public var expiresAt: Date
   public var name: String?
   public var avatarURL: URL?
+  /// Account/channel routing captured from the authenticated YouTube bootstrap.
+  public var accountIndex: Int?
+  public var delegatedSessionID: String?
+  public var userSessionID: String?
 
-  public init(cookies: [String: String], expiresAt: Date, name: String? = nil, avatarURL: URL? = nil) {
+  public init(
+    cookies: [String: String], expiresAt: Date, name: String? = nil, avatarURL: URL? = nil,
+    accountIndex: Int? = nil, delegatedSessionID: String? = nil, userSessionID: String? = nil
+  ) {
     self.cookies = cookies
     self.expiresAt = expiresAt
     self.name = name
     self.avatarURL = avatarURL
+    self.accountIndex = accountIndex
+    self.delegatedSessionID = delegatedSessionID
+    self.userSessionID = userSessionID
   }
 
   /// Cookies captured from a sign-in are usable only if they carry a SAPISID-family secret.
   public var hasAuthCookie: Bool {
-    cookies["SAPISID"] != nil || cookies["__Secure-3PAPISID"] != nil
+    ["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"].contains {
+      cookies[$0]?.isEmpty == false
+    }
+  }
+
+  public func hasSameIdentity(as other: GoogleSession) -> Bool {
+    cookies == other.cookies && accountIndex == other.accountIndex
+      && delegatedSessionID == other.delegatedSessionID && userSessionID == other.userSessionID
   }
 
   /// Names whose `.google.com` copies are accepted when capturing cookies.
@@ -28,6 +45,13 @@ public struct GoogleSession: Codable, Sendable, Equatable {
     "SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PSID",
     "__Secure-1PAPISID", "__Secure-3PAPISID", "LOGIN_INFO",
   ]
+
+  /// Cookie domains may start with a dot; suffix lookalikes must never import credentials.
+  public static func matchesDomain(_ domain: String, root: String) -> Bool {
+    let host = (domain.hasPrefix(".") ? String(domain.dropFirst()) : domain).lowercased()
+    let root = root.lowercased()
+    return host == root || host.hasSuffix("." + root)
+  }
 }
 
 public protocol SessionProviding: Sendable {
@@ -46,7 +70,10 @@ public actor InMemorySessionStore: SessionStore {
     self.session = session
   }
 
-  public func current() async -> GoogleSession? { session }
+  public func current() async -> GoogleSession? {
+    guard let session, session.expiresAt > Date() else { return nil }
+    return session
+  }
 
   public func save(_ s: GoogleSession?) async { session = s }
 }

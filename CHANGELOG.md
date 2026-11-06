@@ -1,0 +1,19 @@
+# Changelog
+
+## Unreleased
+
+- Audited every outbound request family against current public YouTube responses, captured official WEB traffic, and pinned yt-dlp/YouTube.js implementations. See [API contract audit](API_AUDIT.md) for coverage, verification, deliberate compatibility differences, and authenticated/device verification gaps.
+- Corrected client identity and account handling: preserve complete bootstrap versions and endpoint context, separate HTTP/context user agents, scope bootstrap and playback caches to the account, support SAPISID-family signing variants, and retain observed account/channel routing without inventing defaults.
+- Matched watch registration to the observed WEB POST/form contract, including the bootstrap XSRF token and actual playback position. Preserve signed tracking-query bytes; do not fabricate browser timing, format, or browser-version fields. Account watch-duration/completion and remote resume synchronization are not implemented.
+- Corrected server-issued subscription, rating, and playlist commands, including separate removal params and playlist item-set IDs. Failed HTTP-200 responses and HTTP 401 now reach the appropriate error/authentication handling instead of appearing successful.
+- Hardened cookie capture/import and network boundaries: reject unrelated cookie hosts/paths, disable ambient cookies, propagate request cancellation, and block cross-origin credential-bearing or POST redirects. Account switches discard stale responses and reload playback without changing the user's play/pause intent.
+- Corrected WEB search suggestions, localized channel-tab selection, nested comments, and continuation error handling. Failed pagination retains visible content, exposes the failure, and no longer masquerades as the end of the feed.
+- Improved stream/audio selection and signed-caption handling, including original-language audio, expiring URLs, explicit caption errors, and challenge/DRM/unsupported-format rejection. Live chat now preserves positive server polling delays and the observed visible-document request context.
+- Corrected SponsorBlock empty-response and action/range handling so unsupported or malformed responses cannot become automatic skips.
+- Fixed signed-in watch history: actual video and livestream playback now sends YouTube's authenticated history-recording request and refreshes the History feed after success. Playback-resolution failures and buffering do not count as watches; recording errors are shown in Library. Existing local resume progress is unchanged, and earlier unreported playback is not retroactively uploaded.
+- Added on-device search history with the 30 most recent searches, one-tap re-search, matching recent-search suggestions, individual removal, and clear-history controls. Repeated searches move to the top; typed drafts and opened YouTube links are not saved.
+- Added a native, read-only **Live chat** panel beneath livestream playback. Chat follows new messages, pauses automatic scrolling when browsing older messages, and offers a reconnect button after connection errors.
+- Live chat displays text and emoji, author badges, Super Chats, paid stickers, and membership messages. Moderation removals and replacements apply to the retained 300-message window.
+- Chat polling stops when the panel is hidden, playback changes, or the app leaves the foreground. Chat follows the current broadcast, not delayed DVR playback; archived chat replay is not supported.
+- Livestreams start at the live edge instead of restoring recorded-video progress. Added **Go live**, DVR-window seeking, and non-DVR seek restrictions.
+- Corrected active-live detection while preserving recorded-stream playback, chapters, and resume behavior. Active streams no longer save watch offsets or apply SponsorBlock skips; lock-screen metadata identifies live playback.

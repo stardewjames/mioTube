@@ -32,10 +32,9 @@ public struct AudioTrack: Sendable, Hashable {
     tag.replacingOccurrences(of: "_", with: "-").lowercased()
   }
 
-  /// Picks the track to start on from a `player` response: the one flagged `audioIsDefault`
-  /// (the video's original audio), else the one marked `acont=original` in the stream URL, else
-  /// the sole track. `nil` when several tracks exist and none is marked — guessing there is how
-  /// the wrong language gets played.
+  /// Prefers an explicit `acont=original` track, then the client's `audioIsDefault` choice,
+  /// then a sole track. A client's default can be a dub, so it is not proof of originality.
+  /// `nil` when several tracks exist and none is marked.
   static func preferred(in player: JSONValue?) -> AudioTrack? {
     guard let streaming = player?["streamingData"] else { return nil }
     let formats = (streaming["adaptiveFormats"]?.array ?? []) + (streaming["formats"]?.array ?? [])
@@ -50,8 +49,8 @@ public struct AudioTrack: Sendable, Hashable {
       if raw["audioIsDefault"]?.bool == true { defaultID = defaultID ?? id }
       if xtags(in: format["url"]?.string)?.contains("acont=original") == true { originalIDs.insert(id) }
     }
-    if let defaultID, let track = tracks.first(where: { $0.id == defaultID }) { return track }
     if let original = tracks.first(where: { originalIDs.contains($0.id) }) { return original }
+    if let defaultID, let track = tracks.first(where: { $0.id == defaultID }) { return track }
     return tracks.count == 1 ? tracks.first : nil
   }
 

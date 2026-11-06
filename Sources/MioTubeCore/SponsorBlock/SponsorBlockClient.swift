@@ -90,8 +90,13 @@ public actor SponsorBlockClient {
     let request = Self.request(videoID: videoID, categories: categories, server: server, privacyMode: privacyMode)
     let data: Data
     do {
-      data = try await transport.send(request).data
-    } catch MioTubeError.http(let status, _) where status == 404 || status == 204 {
+      let response = try await transport.send(request)
+      if response.status == 204 {
+        await cache.store([], for: cacheKey)
+        return []
+      }
+      data = response.data
+    } catch MioTubeError.http(let status, _) where status == 404 {
       await cache.store([], for: cacheKey)
       return []
     }
@@ -121,19 +126,29 @@ public actor SponsorBlockClient {
 
   static func decode(_ data: Data, videoID: String, hashed: Bool) throws -> [SponsorSegment] {
     let json = try JSONValue.decode(data)
+    guard let items = json.array else {
+      throw MioTubeError.invalidResponse("SponsorBlock returned a non-array segment response")
+    }
     let raw: [JSONValue]
     if hashed {
-      raw = (json.array ?? []).filter { $0["videoID"]?.string == videoID }.flatMap { $0["segments"]?.array ?? [] }
+      raw = items.filter { $0["videoID"]?.string == videoID }.flatMap { $0["segments"]?.array ?? [] }
     } else {
-      raw = json.array ?? []
+      raw = items
     }
     return raw.compactMap { item in
       guard let pair = item["segment"]?.array, pair.count == 2,
             let start = pair[0].double, let end = pair[1].double,
+            start.isFinite, end.isFinite, start >= 0, end >= start,
             let uuid = item["UUID"]?.string,
             let category = item["category"]?.string.flatMap(SponsorCategory.init(rawValue:))
       else { return nil }
-      let action = item["actionType"]?.string.flatMap(SponsorAction.init(rawValue:)) ?? .skip
+      let action: SponsorAction
+      if let value = item["actionType"]?.string {
+        guard let known = SponsorAction(rawValue: value) else { return nil }
+        action = known
+      } else {
+        action = .skip
+      }
       return SponsorSegment(uuid: uuid, start: start, end: end, category: category, action: action, votes: item["votes"]?.int ?? 0)
     }
     .sorted { $0.start < $1.start }

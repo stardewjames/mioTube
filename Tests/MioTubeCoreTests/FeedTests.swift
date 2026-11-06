@@ -165,7 +165,7 @@ import Testing
     let spy = SpyTransport { _ in HTTPResponse(status: 200, data: counter.next() == 1 ? first : second) }
     let cache = FeedCache(directory: nil)
     let loader = FeedLoader(client: try makeClient(spy), cache: cache)
-    let key = FeedKey.channel("UCuAXFkgsw1L7xaCfnd5JJOw", .videos)
+    let key = FeedKey.channel("UCuAXFkgsw1L7xaCfnd5JJOw", .home)
 
     let firstPage = try await loader.load(key, forceRefresh: true)
     let reloaded = try await loader.load(key, forceRefresh: true)
@@ -201,17 +201,48 @@ import Testing
     #expect(await reopened.page(for: .home) == nil)
   }
 
-  @Test func emptySignedOutHomeFallsBackToDestinations() async throws {
-    let spy = SpyTransport { request in
-      let id = request.jsonBody?["browseId"]?.string
-      return HTTPResponse(status: 200, data: try Fixture.data(id == "FEwhat_to_watch" ? "home.json" : "browse_shelves.json"))
-    }
-    let loader = FeedLoader(client: try makeClient(spy), cache: FeedCache(directory: nil), homeFallbackBrowseIDs: ["UCa", "UCb"])
+  @Test func signedOutHomeShowsOnlyTheNudge() async throws {
+    let spy = SpyTransport(body: try Fixture.data("home.json"))
+    let loader = FeedLoader(client: try makeClient(spy), cache: FeedCache(directory: nil))
     let page = try await loader.load(.home, forceRefresh: true)
-    #expect(spy.requests.count == 3)
-    #expect(!page.items.isEmpty)
+    // No destination-channel requests: their sections are special sections, not Home content.
+    #expect(spy.requests.count == 1)
+    #expect(page.items.isEmpty)
+    #expect(page.sections.isEmpty)
     #expect(page.notice == "Try searching to get started")
     #expect(page.continuation == nil)
+  }
+
+  @Test func homeDropsSpecialSectionsButKeepsRecommendations() async throws {
+    let spy = SpyTransport(body: try Fixture.data("ads_synthetic.json"))
+    let cache = FeedCache(directory: nil)
+    let loader = FeedLoader(client: try makeClient(spy), cache: cache)
+    let page = try await loader.load(.home, forceRefresh: true)
+    #expect(page.sections.count == 1 && page.sections[0].title == nil)
+    #expect(page.videos.map(\.videoID) == ["REAL00000001"])
+    #expect(page.continuation == "NEXT_TOKEN")
+
+    // A Home snapshot cached before the filter must render clean on first paint too.
+    await cache.store(FeedParser.parse(try Fixture.json("ads_synthetic.json")), for: .home, endpoint: "browse")
+    let cachedPage = await loader.cached(.home)
+    let cached = try #require(cachedPage)
+    #expect(cached.sections.count == 1 && cached.sections[0].title == nil)
+  }
+
+  @Test func homeContinuationAlsoDropsSpecialSections() async throws {
+    let spy = SpyTransport(body: try Fixture.data("ads_synthetic.json"))
+    let loader = FeedLoader(client: try makeClient(spy), cache: FeedCache(directory: nil))
+    _ = try await loader.load(.home, forceRefresh: true)
+    let continuationPage = try await loader.nextPage(.home)
+    let next = try #require(continuationPage)
+    #expect(!next.sections.isEmpty && next.sections.allSatisfy { $0.title == nil })
+  }
+
+  @Test func otherFeedsKeepTheirShelves() async throws {
+    let spy = SpyTransport(body: try Fixture.data("browse_shelves.json"))
+    let loader = FeedLoader(client: try makeClient(spy), cache: FeedCache(directory: nil))
+    let page = try await loader.load(.channel("UCx", .home), forceRefresh: true)
+    #expect(page.sections.contains { $0.title != nil })
   }
 
   @Test func chipSearchUsesContinuationBody() async throws {
@@ -222,8 +253,73 @@ import Testing
     #expect(spy.requests.first?.jsonBody?["continuation"] == "CHIP")
   }
 
-  @Test func suggestionsParse() throws {
-    let json = try JSONValue.decode(Data(#"["swift",["swift","swiftui","swift taylor"]]"#.utf8))
-    #expect(SearchSuggestions.parse(json) == ["swift", "swiftui", "swift taylor"])
+  @Test func suggestionsDecodeOnlyFixedJSONPAndReadNestedRows() throws {
+    let data = Data(#"window.google.ac.h(["swift",[["swift",0,[512]],["swiftui",0,[512]]],{}]);"#.utf8)
+    let json = try #require(SearchSuggestions.decode(data))
+    #expect(SearchSuggestions.parse(json) == ["swift", "swiftui"])
+    #expect(SearchSuggestions.decode(Data(#"evil(["swift",[]])"#.utf8)) == nil)
+  }
+
+  @Test func suggestionsUseWebQueryFamilyAndRejectHTTPFailure() async throws {
+    let spy = SpyTransport(body: Data(#"window.google.ac.h(["swift",[["swiftui",0,[512]]]])"#.utf8))
+    #expect(await SearchSuggestions(transport: spy, hl: "fr", gl: "CA").suggestions(for: " swift ") == ["swiftui"])
+    let request = try #require(spy.requests.first)
+    let query = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    #expect(request.url.host == "www.youtube.com" && request.url.path == "/complete/search")
+    #expect(query.contains(URLQueryItem(name: "client", value: "youtube")))
+    #expect(query.contains(URLQueryItem(name: "gl", value: "CA")))
+    #expect(query.contains(URLQueryItem(name: "q", value: "swift")))
+    let failed = SpyTransport { _ in HTTPResponse(status: 503, data: Data(#"window.google.ac.h(["swift",[["wrong"]]])"#.utf8)) }
+    #expect(await SearchSuggestions(transport: failed, hl: "en").suggestions(for: "swift").isEmpty)
+  }
+
+  @Test func localizedChannelTabUsesNavigationURLAndOpaqueParams() async throws {
+    let landing: JSONValue = ["contents": ["twoColumnBrowseResultsRenderer": ["tabs": [
+      ["tabRenderer": ["title": "Accueil", "selected": true, "content": ["sectionListRenderer": ["contents": []]]]],
+      ["tabRenderer": ["title": "En direct", "endpoint": [
+        "commandMetadata": ["webCommandMetadata": ["url": "/@channel/streams"]],
+        "browseEndpoint": ["browseId": "UC1", "params": "opaque%3D%3D"],
+      ]]],
+    ]]]]
+    let spy = SpyTransport { request in
+      HTTPResponse(status: 200, data: try (request.jsonBody?["params"] == nil ? landing : ["contents": [:]]).encoded())
+    }
+    let loader = FeedLoader(client: try makeClient(spy), cache: FeedCache(directory: nil))
+    _ = try await loader.load(.channel("UC1", .live), forceRefresh: true)
+    #expect(spy.requests.count == 2)
+    #expect(spy.requests.last?.jsonBody?["params"] == "opaque%3D%3D")
+  }
+
+  @Test func errorAlertIsNotAnEmptyPlaylistAndIsNotCached() async throws {
+    let spy = SpyTransport(body: Data(#"{"alerts":[{"alertRenderer":{"type":"ERROR","text":{"simpleText":"The playlist does not exist."}}}]}"#.utf8))
+    let cache = FeedCache(directory: nil)
+    let loader = FeedLoader(client: try makeClient(spy), cache: cache)
+    await #expect(throws: MioTubeError.self) { try await loader.load(.playlist("missing"), forceRefresh: true) }
+    #expect(await cache.page(for: .playlist("missing")) == nil)
+  }
+}
+
+extension FeedParserTests {
+  @Test func commentRepliesAcceptNestedViewModelsAndPreserveSortTokens() {
+    let page = CommentsParser.parse([
+      "frameworkUpdates": ["entityBatchUpdate": ["mutations": [[
+        "entityKey": "entity", "payload": ["commentEntityPayload": [
+          "properties": ["commentId": "reply", "content": ["content": "A real reply"], "publishedTime": "1 day ago"],
+          "author": ["displayName": "@author"], "toolbar": ["replyCount": "2", "likeCountNotliked": "4"],
+        ]],
+      ]]]],
+      "onResponseReceivedEndpoints": [["appendContinuationItemsAction": ["continuationItems": [
+        ["commentsHeaderRenderer": ["sortMenu": ["sortFilterSubMenuRenderer": ["subMenuItems": [
+          ["title": "Newest", "selected": true, "serviceEndpoint": ["continuationCommand": ["token": "sort%3D"]]],
+        ]]]]],
+        ["commentViewModel": ["commentViewModel": ["commentKey": "entity"]]],
+        ["continuationItemRenderer": ["continuationEndpoint": ["continuationCommand": ["token": "next%3D"]]]],
+      ]]]],
+    ])
+    #expect(page.comments.first?.id == "reply")
+    #expect(page.comments.first?.text == "A real reply")
+    #expect(page.comments.first?.replyCount == 2)
+    #expect(page.continuation == "next%3D")
+    #expect(page.sortOptions.first?.token == "sort%3D" && page.sortOptions.first?.isSelected == true)
   }
 }

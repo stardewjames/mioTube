@@ -5,35 +5,26 @@ public struct FeedLoader: Sendable {
   public let client: InnertubeClient
   public let cache: FeedCache
   public let adFilter: AdFilter
-  /// Signed-out `FEwhat_to_watch` is an empty "Try searching" nudge for fresh visitors; these
-  /// YouTube destination channels (Music, Live, Sports, News) fill Home instead.
-  public let homeFallbackBrowseIDs: [String]
 
-  public static let defaultHomeFallback = [
-    "UC-9-kyTW8ZkZNDHQJ6FgpwQ", "UC4R8DWoMoI7CAwX8_LjQHig", "UCEgdi0XIXXZ-qJOFPf4JSKw", "UCYfdidRxbB8Qhf0Nx7ioOYw",
-  ]
-
-  public init(
-    client: InnertubeClient, cache: FeedCache, adFilter: AdFilter = .init(),
-    homeFallbackBrowseIDs: [String] = FeedLoader.defaultHomeFallback
-  ) {
+  public init(client: InnertubeClient, cache: FeedCache, adFilter: AdFilter = .init()) {
     self.client = client
     self.cache = cache
     self.adFilter = adFilter
-    self.homeFallbackBrowseIDs = homeFallbackBrowseIDs
   }
 
   /// Cached copy when present (no network), otherwise fetches and replaces page 0.
   public func load(_ key: FeedKey, forceRefresh: Bool) async throws -> FeedPage {
-    if !forceRefresh, let cached = await cache.page(for: key) { return cached }
+    if !forceRefresh, let cached = await cached(key) { return cached }
     let (endpoint, page) = try await fetchFirstPage(key)
     await cache.store(page, for: key, endpoint: endpoint)
     return page
   }
 
   /// Cached page without touching the network (stale-while-revalidate first paint).
+  /// Home snapshots written before special-section filtering are cleaned on read.
   public func cached(_ key: FeedKey) async -> FeedPage? {
-    await cache.page(for: key)
+    guard let page = await cache.page(for: key) else { return nil }
+    return key == .home ? page.removingSpecialSections() : page
   }
 
   /// Fetches the next continuation page, appends it to the cache and returns it.
@@ -42,7 +33,8 @@ public struct FeedLoader: Sendable {
     guard let token = await cache.continuation(for: key) else { return nil }
     let endpoint = await cache.endpoint(for: key) ?? "browse"
     let json = try await client.post(endpoint, ["continuation": .string(token)])
-    let page = FeedParser.parse(json, adFilter: adFilter)
+    let parsed = try parsePage(json)
+    let page = key == .home ? parsed.removingSpecialSections() : parsed
     await cache.append(page, to: key)
     return page
   }
@@ -52,11 +44,7 @@ public struct FeedLoader: Sendable {
   func fetchFirstPage(_ key: FeedKey) async throws -> (String, FeedPage) {
     switch key {
     case .home:
-      let page = try await browse(["browseId": "FEwhat_to_watch"])
-      if page.items.isEmpty, !homeFallbackBrowseIDs.isEmpty {
-        return ("browse", await homeFallback(notice: page.notice, droppedAds: page.droppedAds))
-      }
-      return ("browse", page)
+      return ("browse", try await browse(["browseId": "FEwhat_to_watch"]).removingSpecialSections())
     case .subscriptions:
       return ("browse", try await browse(["browseId": "FEsubscriptions"]))
     case .history:
@@ -67,10 +55,19 @@ public struct FeedLoader: Sendable {
       return ("browse", try await browse(["browseId": .string(id.hasPrefix("VL") ? id : "VL\(id)")]))
     case .channel(let id, let tab):
       let landing = try await browse(["browseId": .string(id)])
-      guard tab != .home,
-            let target = landing.tabs.first(where: { $0.title.caseInsensitiveCompare(tab.rawValue) == .orderedSame }),
-            !target.isSelected, let params = target.params
-      else { return ("browse", landing) }
+      guard tab != .home else { return ("browse", landing) }
+      guard let target = landing.tabs.first(where: {
+        guard let raw = $0.navigationURL, let url = URL(string: raw) else {
+          return $0.title.caseInsensitiveCompare(tab.rawValue) == .orderedSame
+        }
+        return url.lastPathComponent == (tab == .live ? "streams" : tab.rawValue.lowercased())
+      }) else {
+        throw MioTubeError.invalidResponse("This channel does not provide the requested tab.")
+      }
+      if target.isSelected { return ("browse", landing) }
+      guard let params = target.params else {
+        throw MioTubeError.invalidResponse("YouTube did not provide a channel tab endpoint.")
+      }
       var page = try await browse(["browseId": .string(id), "params": .string(params)])
       if page.header == nil { page.header = landing.header }
       if page.tabs.isEmpty { page.tabs = landing.tabs }
@@ -82,7 +79,7 @@ public struct FeedLoader: Sendable {
       case .params(let params)?: body = ["query": .string(query), "params": .string(params)]
       case nil: body = ["query": .string(query)]
       }
-      var page = FeedParser.parse(try await client.post("search", body), adFilter: adFilter)
+      var page = try parsePage(try await client.post("search", body))
       if page.chips.isEmpty, filter != nil, let base = await cache.page(for: .search(query)) {
         page.chips = base.chips.map {
           SearchChip(title: $0.title, params: $0.params, token: $0.token, isSelected: $0.filter == filter)
@@ -93,35 +90,16 @@ public struct FeedLoader: Sendable {
   }
 
   private func browse(_ body: JSONValue) async throws -> FeedPage {
-    FeedParser.parse(try await client.post("browse", body), adFilter: adFilter)
+    try parsePage(try await client.post("browse", body))
   }
 
-  private func homeFallback(notice: String?, droppedAds: Int) async -> FeedPage {
-    let pages = await withTaskGroup(of: (Int, FeedPage?).self) { group in
-      for (index, id) in homeFallbackBrowseIDs.enumerated() {
-        group.addTask { (index, try? await browse(["browseId": .string(id)])) }
-      }
-      var results: [(Int, FeedPage)] = []
-      for await (index, page) in group {
-        if let page { results.append((index, page)) }
-      }
-      return results.sorted { $0.0 < $1.0 }.map(\.1)
-    }
-    let sections = pages.flatMap { page in
-      page.sections.map { section in
-        FeedSection(
-          id: section.id,
-          title: section.title ?? page.header?.title,
-          items: section.items,
-          continuation: nil
-        )
+  private func parsePage(_ json: JSONValue) throws -> FeedPage {
+    for alert in json["alerts"]?.array ?? [] {
+      if let renderer = alert["alertRenderer"], renderer["type"]?.string == "ERROR" {
+        throw MioTubeError.invalidResponse(renderer["text"]?.text ?? "YouTube could not load this feed.")
       }
     }
-    return FeedPage(
-      sections: sections, continuation: nil,
-      droppedAds: droppedAds + pages.reduce(0) { $0 + $1.droppedAds },
-      notice: notice
-    )
+    return FeedParser.parse(json, adFilter: adFilter)
   }
 }
 
@@ -129,29 +107,44 @@ public struct FeedLoader: Sendable {
 public struct SearchSuggestions: Sendable {
   public let transport: any HTTPTransport
   public let hl: String
+  public let gl: String
 
-  public init(transport: any HTTPTransport, hl: String) {
+  public init(transport: any HTTPTransport, hl: String, gl: String = "US") {
     self.transport = transport
     self.hl = hl
+    self.gl = gl
   }
 
   public func suggestions(for query: String) async -> [String] {
     let trimmed = query.trimmingCharacters(in: .whitespaces)
     guard !trimmed.isEmpty else { return [] }
-    var components = URLComponents(string: "https://suggestqueries.google.com/complete/search")!
+    var components = URLComponents(string: "https://www.youtube.com/complete/search")!
     components.queryItems = [
-      .init(name: "client", value: "firefox"), .init(name: "ds", value: "yt"),
-      .init(name: "hl", value: hl), .init(name: "q", value: trimmed),
+      .init(name: "client", value: "youtube"), .init(name: "gs_ri", value: "youtube"),
+      .init(name: "ds", value: "yt"), .init(name: "hl", value: hl),
+      .init(name: "gl", value: gl), .init(name: "q", value: trimmed),
     ]
     guard let url = components.url,
           let response = try? await transport.send(HTTPRequest(url: url, timeout: 5)),
-          let json = try? JSONValue.decode(response.data)
+          (200..<300).contains(response.status),
+          let json = Self.decode(response.data)
     else { return [] }
     return Self.parse(json)
   }
 
-  /// `["query", ["s1", "s2", ...], ...]`
+  /// The WEB endpoint returns a fixed JSONP wrapper and nested suggestion rows; never execute it.
+  static func decode(_ data: Data) -> JSONValue? {
+    guard var text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+          text.hasPrefix("window.google.ac.h(") else { return nil }
+    text.removeFirst("window.google.ac.h(".count)
+    if text.hasSuffix(";") { text.removeLast() }
+    guard text.hasSuffix(")") else { return nil }
+    text.removeLast()
+    return try? JSONValue.decode(Data(text.utf8))
+  }
+
+  /// `["query", [["suggestion", ...], ...], ...]`
   public static func parse(_ json: JSONValue) -> [String] {
-    json["1"]?.array?.compactMap(\.string) ?? []
+    json["1"]?.array?.compactMap { $0["0"]?.string } ?? []
   }
 }

@@ -1,7 +1,7 @@
 import Foundation
 
-/// One InnerTube client identity. All values are data (ClientProfiles.json) so YouTube drift
-/// is fixed without touching code.
+/// A compatibility identity sourced from maintained InnerTube implementations, not a claim
+/// of full native-client emulation. WEB may use its live bootstrap version; other pins are fallbacks.
 public struct ClientProfile: Sendable, Codable, Identifiable, Hashable {
   public let id: String
   public let clientName: String
@@ -10,10 +10,19 @@ public struct ClientProfile: Sendable, Codable, Identifiable, Hashable {
   public let clientNameHeader: Int
   public let userAgent: String?
   public let supportsCookies: Bool
+  /// Allows consuming an HLS URL when the response actually supplies one.
   public let supportsHLS: Bool
-  /// Profiles whose stream URLs need `base.js` signature/n-param solving. Never used for playback.
+  /// Skip this profile for native playback. A false value still requires checking each URL
+  /// for signature/n-param transforms; it does not assert that every returned format is usable.
   public let requiresJSPlayer: Bool
   public let extraContext: [String: JSONValue]?
+
+  /// `gzip(gfe)` describes the client context, not an HTTP browser user-agent token.
+  public var httpUserAgent: String? {
+    guard let userAgent else { return nil }
+    let suffix = ",gzip(gfe)"
+    return userAgent.hasSuffix(suffix) ? String(userAgent.dropLast(suffix.count)) : userAgent
+  }
 
   public init(
     id: String, clientName: String, clientVersion: String, clientNameHeader: Int, userAgent: String?,

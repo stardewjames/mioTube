@@ -45,7 +45,7 @@ final class FeedModel {
     }
     // A reload must never be dropped because an automatic load happens to be in flight; it
     // supersedes that request (see `fetch`) instead of racing it.
-    guard force || !isFetching else { return }
+    guard force || loadedRevision != env.sessionRevision || !isFetching else { return }
     await fetch(env, force: force)
   }
 
@@ -73,10 +73,12 @@ final class FeedModel {
       error = nil
       reachedEnd = fresh.continuation == nil
       env.diagnostics.record(feed: key, droppedAds: fresh.droppedAds)
+    } catch is CancellationError {
+      return
     } catch MioTubeError.unauthorized {
       guard token == generation else { return }
       env.account.markExpired()
-      error = "Session expired — sign in again"
+      error = Self.describe(MioTubeError.unauthorized)
     } catch {
       guard token == generation else { return }
       // A refresh that fails keeps the last good page on screen; the banner above it says why.
@@ -85,7 +87,7 @@ final class FeedModel {
   }
 
   func loadMore(_ env: AppEnvironment) async {
-    guard !isLoadingMore, !isFetching, !reachedEnd, page?.continuation != nil else { return }
+    guard !isLoadingMore, !isFetching, error == nil, !reachedEnd, page?.continuation != nil else { return }
     let token = generation
     isLoadingMore = true
     defer { isLoadingMore = false }
@@ -99,9 +101,15 @@ final class FeedModel {
       env.diagnostics.record(feed: key, droppedAds: next.droppedAds)
       page = await env.feedLoader.cached(key)
       reachedEnd = next.continuation == nil || next.items.isEmpty
+    } catch is CancellationError {
+      return
+    } catch MioTubeError.unauthorized {
+      guard token == generation else { return }
+      env.account.markExpired()
+      error = Self.describe(MioTubeError.unauthorized)
     } catch {
       guard token == generation else { return }
-      reachedEnd = true
+      self.error = Self.describe(error)
     }
   }
 
@@ -110,9 +118,17 @@ final class FeedModel {
     case MioTubeError.transport(let message): message
     case MioTubeError.http(let status, _): "YouTube returned HTTP \(status)"
     case MioTubeError.notSignedIn: "Sign in to see this feed"
+    case MioTubeError.unauthorized: "Session expired — sign in again"
+    case MioTubeError.invalidResponse(let message): message
+    case MioTubeError.decoding(let message): message
     default: error.localizedDescription
     }
   }
+}
+
+nonisolated private struct FeedLoadRevision: Equatable {
+  let account: Int
+  let history: Int
 }
 
 /// Section-aware grid of feed items with infinite scroll.
@@ -161,7 +177,9 @@ struct FeedScrollView<Header: View>: View {
     }
     .scrollEdgeEffectStyle(.soft, for: .top)
     .refreshable { await model.load(env, force: true) }
-    .task(id: env.sessionRevision) { await model.load(env) }
+    .task(id: FeedLoadRevision(
+      account: env.sessionRevision, history: model.key == .history ? env.historyRevision : 0
+    )) { await model.load(env, force: model.key == .history) }
     .toolbar {
       ToolbarItem(placement: .topBarLeading) {
         Button {
@@ -239,9 +257,9 @@ struct FeedItemView: View {
       } label: {
         Group {
           if style == .grid {
-            VideoCard(video: video).equatable()
+            VideoCard(video: video, progress: env.watchProgress.entry(for: video.videoID)).equatable()
           } else {
-            VideoRow(video: video).equatable()
+            VideoRow(video: video, progress: env.watchProgress.entry(for: video.videoID)).equatable()
           }
         }
         .modifier(ZoomSource(id: video.videoID, namespace: namespace))

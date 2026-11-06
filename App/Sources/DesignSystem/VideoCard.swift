@@ -25,15 +25,31 @@ struct LiveBadge: View {
   }
 }
 
-/// 16:9 thumbnail with duration pill / live badge.
+/// 16:9 thumbnail with duration pill / live badge, plus watched state.
 struct VideoThumbnail: View {
   let video: VideoSummary
+  var progress: WatchProgress? = nil
   var cornerRadius: CGFloat = 12
+
+  private var playedFraction: Double? {
+    guard let progress, !progress.isFinished, progress.fraction > 0 else { return nil }
+    return progress.fraction
+  }
 
   var body: some View {
     RemoteImage(url: video.bestThumbnailURL)
       .aspectRatio(16 / 9, contentMode: .fit)
-      .clipShape(.rect(cornerRadius: cornerRadius))
+      .overlay(alignment: .topLeading) {
+        if progress?.isFinished == true {
+          Label("Watched", systemImage: "checkmark")
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(.ultraThinMaterial, in: .capsule)
+            .padding(6)
+            .accessibilityLabel("Watched")
+        }
+      }
       .overlay(alignment: .bottomTrailing) {
         Group {
           if video.isLive {
@@ -54,18 +70,39 @@ struct VideoThumbnail: View {
         }
         .padding(6)
       }
+      .overlay(alignment: .bottom) {
+        if let playedFraction {
+          GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+              Color.black.opacity(0.35)
+              Color.red.frame(width: proxy.size.width * playedFraction)
+            }
+          }
+          .frame(height: 3)
+          .accessibilityLabel("\(Int((playedFraction * 100).rounded())) percent watched")
+        }
+      }
+      .clipShape(.rect(cornerRadius: cornerRadius))
   }
 }
 
 /// Grid card: thumbnail, two-line title, channel + views line.
 struct VideoCard: View, Equatable {
   let video: VideoSummary
+  let progress: WatchProgress?
 
-  nonisolated static func == (lhs: VideoCard, rhs: VideoCard) -> Bool { lhs.video == rhs.video }
+  init(video: VideoSummary, progress: WatchProgress? = nil) {
+    self.video = video
+    self.progress = progress
+  }
+
+  nonisolated static func == (lhs: VideoCard, rhs: VideoCard) -> Bool {
+    lhs.video == rhs.video && lhs.progress == rhs.progress
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
-      VideoThumbnail(video: video)
+      VideoThumbnail(video: video, progress: progress)
       Text(video.title)
         .font(.subheadline.weight(.semibold))
         .lineLimit(2)
@@ -83,12 +120,20 @@ struct VideoCard: View, Equatable {
 /// Compact row (search results, related, playlists): 160 pt thumbnail.
 struct VideoRow: View, Equatable {
   let video: VideoSummary
+  let progress: WatchProgress?
 
-  nonisolated static func == (lhs: VideoRow, rhs: VideoRow) -> Bool { lhs.video == rhs.video }
+  init(video: VideoSummary, progress: WatchProgress? = nil) {
+    self.video = video
+    self.progress = progress
+  }
+
+  nonisolated static func == (lhs: VideoRow, rhs: VideoRow) -> Bool {
+    lhs.video == rhs.video && lhs.progress == rhs.progress
+  }
 
   var body: some View {
     HStack(alignment: .top, spacing: 12) {
-      VideoThumbnail(video: video, cornerRadius: 8)
+      VideoThumbnail(video: video, progress: progress, cornerRadius: 8)
         .frame(width: 160)
       VStack(alignment: .leading, spacing: 4) {
         Text(video.title)

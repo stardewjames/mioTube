@@ -37,7 +37,7 @@ struct DiagnosticsView: View {
               Text(probe.playabilityStatus ?? "—").font(.caption.monospaced())
                 .foregroundStyle(probe.source != nil ? Color.green : Color.secondary)
             }
-            Text("HLS: \(probe.hlsManifestURL != nil ? "yes" : "no") · muxed itags: \(probe.muxedItags.isEmpty ? "none" : probe.muxedItags.map(String.init).joined(separator: ",")) · ad placements: \(probe.hasAdPlacements ? "yes (ignored)" : "no")")
+            Text("HLS: \(probe.hlsManifestURL != nil ? "yes" : "no") · fallback: \(probe.fallbackSource != nil ? "yes" : "no") · muxed itags: \(probe.muxedItags.isEmpty ? "none" : probe.muxedItags.map(String.init).joined(separator: ",")) · ad placements: \(probe.hasAdPlacements ? "yes (ignored)" : "no")")
               .font(.caption)
               .foregroundStyle(.secondary)
             if let reason = probe.reason {
@@ -125,7 +125,7 @@ struct DiagnosticsView: View {
       "droppedAds(feed): \(env.diagnostics.lastFeedDroppedAds) total: \(env.settings.blockedAdsTotal)",
     ]
     for probe in probes {
-      lines.append("\(probe.profile): status=\(probe.playabilityStatus ?? "-") hls=\(probe.hlsManifestURL != nil) itags=\(probe.muxedItags) ads=\(probe.hasAdPlacements) reason=\(probe.reason ?? "-")")
+      lines.append("\(probe.profile): status=\(probe.playabilityStatus ?? "-") hls=\(probe.hlsManifestURL != nil) fallback=\(probe.fallbackSource != nil) itags=\(probe.muxedItags) ads=\(probe.hasAdPlacements) reason=\(probe.reason ?? "-")")
     }
     return lines.joined(separator: "\n")
   }

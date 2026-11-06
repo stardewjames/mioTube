@@ -23,7 +23,7 @@ struct HomeView: View {
   }
 }
 
-/// Glass banner offering sign-in on the signed-out fallback home.
+/// Glass banner offering sign-in on the signed-out empty home.
 struct SignInBanner: View {
   let message: String
   @Environment(AppEnvironment.self) private var env
@@ -33,8 +33,8 @@ struct SignInBanner: View {
       HStack(spacing: 12) {
         Image(systemName: "sparkles.tv").font(.title2)
         VStack(alignment: .leading, spacing: 2) {
-          Text("Showing popular videos").font(.subheadline.weight(.semibold))
-          Text("\(message). Sign in for your recommendations.").font(.caption).foregroundStyle(.secondary)
+          Text("Sign in for your recommendations").font(.subheadline.weight(.semibold))
+          Text(message).font(.caption).foregroundStyle(.secondary)
         }
         Spacer(minLength: 8)
         Button("Sign in") { env.account.isPresentingSignIn = true }

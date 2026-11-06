@@ -26,7 +26,13 @@ final class CommentsModel {
       for comment in page.comments where seen.insert(comment.id).inserted {
         comments.append(comment)
       }
-      if !page.sortOptions.isEmpty { sortOptions = page.sortOptions }
+      if !page.sortOptions.isEmpty {
+        sortOptions = page.sortOptions
+      } else if reset {
+        sortOptions = sortOptions.map {
+          CommentSortOption(title: $0.title, token: $0.token, isSelected: $0.token == token)
+        }
+      }
       if let count = page.countText { countText = count }
       continuation = page.continuation
       error = nil
@@ -36,8 +42,7 @@ final class CommentsModel {
   }
 
   func loadMore(client: InnertubeClient) async {
-    guard let continuation else { return }
-    self.continuation = nil
+    guard !isLoading, let continuation else { return }
     await load(continuation, client: client, reset: false)
   }
 
@@ -64,6 +69,7 @@ struct CommentsView: View {
                       Task { await model.load(option.token, client: env.client, reset: true) }
                     }
                     .buttonStyle(.glass)
+                    .disabled(model.isLoading)
                     .fontWeight(option.isSelected ? .semibold : .regular)
                   }
                 }

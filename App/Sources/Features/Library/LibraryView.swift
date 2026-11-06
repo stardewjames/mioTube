@@ -16,6 +16,15 @@ struct LibraryView: View {
             NavigationLink(value: Route.feed(.history, title: "History")) {
               Label("History", systemImage: "clock.arrow.circlepath")
             }
+            if let error = env.coordinator.historyError {
+              Label {
+                Text("Couldn't update YouTube watch history: \(error)")
+              } icon: {
+                Image(systemName: "exclamationmark.triangle")
+              }
+              .font(.caption)
+              .foregroundStyle(.secondary)
+            }
             NavigationLink(value: Route.playlist(id: "WL", title: "Watch later")) {
               Label("Watch later", systemImage: "clock")
             }
@@ -39,7 +48,7 @@ struct LibraryView: View {
                 env.coordinator.jump(to: item)
                 env.coordinator.isWatchPresented = true
               } label: {
-                VideoRow(video: item.video)
+                VideoRow(video: item.video, progress: env.watchProgress.entry(for: item.video.videoID))
               }
               .buttonStyle(.plain)
               .queueReorder(id: item.id, dragged: $draggedQueueID, coordinator: env.coordinator)
@@ -85,9 +94,12 @@ struct AccountSummaryRow: View {
         }
       VStack(alignment: .leading, spacing: 2) {
         switch env.account.state {
-        case .signedIn, .validating:
+        case .signedIn:
           Text(env.account.name ?? "Signed in").font(.headline)
           Text("YouTube account").font(.caption).foregroundStyle(.secondary)
+        case .validating:
+          Text(env.account.name ?? "Account").font(.headline)
+          Text("Checking account…").font(.caption).foregroundStyle(.secondary)
         case .expired:
           Text(env.account.name ?? "Account").font(.headline)
           Text("Session expired — sign in again").font(.caption).foregroundStyle(.orange)

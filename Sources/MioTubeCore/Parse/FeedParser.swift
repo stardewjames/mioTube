@@ -216,7 +216,8 @@ public enum FeedParser {
       return ChannelTab(
         title: title,
         params: renderer["endpoint", "browseEndpoint", "params"]?.string,
-        isSelected: renderer["selected"]?.bool ?? false
+        isSelected: renderer["selected"]?.bool ?? false,
+        navigationURL: renderer["endpoint", "commandMetadata", "webCommandMetadata", "url"]?.string
       )
     }
   }

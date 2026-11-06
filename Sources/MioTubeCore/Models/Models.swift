@@ -146,11 +146,13 @@ public struct ChannelTab: Sendable, Hashable, Codable {
   public let title: String
   public let params: String?
   public let isSelected: Bool
+  public let navigationURL: String?
 
-  public init(title: String, params: String?, isSelected: Bool) {
+  public init(title: String, params: String?, isSelected: Bool, navigationURL: String? = nil) {
     self.title = title
     self.params = params
     self.isSelected = isSelected
+    self.navigationURL = navigationURL
   }
 }
 
@@ -179,6 +181,19 @@ public struct FeedPage: Sendable, Hashable, Codable {
 
   public var items: [FeedItem] { sections.flatMap(\.items) }
   public var videos: [VideoSummary] { items.compactMap(\.video) }
+}
+
+extension FeedPage {
+  /// Home shows the plain recommendation stream. YouTube injects titled topical shelves
+  /// ("Breaking news", Live/News/Sports/Music destination rows, …) around it; those are
+  /// special sections, while the recommendation stream itself is untitled.
+  public func removingSpecialSections() -> FeedPage {
+    guard sections.contains(where: { $0.title != nil }) else { return self }
+    return FeedPage(
+      sections: sections.filter { $0.title == nil }, continuation: continuation,
+      droppedAds: droppedAds, chips: chips, header: header, tabs: tabs, notice: notice
+    )
+  }
 }
 
 public struct Comment: Identifiable, Sendable, Hashable, Codable {

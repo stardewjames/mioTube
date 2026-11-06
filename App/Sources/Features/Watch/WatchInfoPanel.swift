@@ -8,6 +8,8 @@ struct WatchInfoPanel: View {
   @State private var likeOverride: LikeStatus?
   @State private var subscribedOverride: Bool?
   @State private var actionError: String?
+  @State private var isUpdatingLike = false
+  @State private var isUpdatingSubscription = false
   @State private var showingPlaylists = false
   @State private var draggedQueueID: QueueItem.ID?
 
@@ -17,6 +19,12 @@ struct WatchInfoPanel: View {
     if let info = coordinator.info {
       VStack(alignment: .leading, spacing: 16) {
         header(info)
+        if let error = coordinator.historyError {
+          Text(error).font(.caption).foregroundStyle(.secondary)
+        }
+        if let error = coordinator.captionError {
+          Text(error).font(.caption).foregroundStyle(.secondary)
+        }
         actions(info)
         channelRow(info)
         description(info)
@@ -42,6 +50,13 @@ struct WatchInfoPanel: View {
         likeOverride = nil
         subscribedOverride = nil
         descriptionExpanded = false
+        actionError = nil
+      }
+      .onChange(of: env.sessionRevision) {
+        likeOverride = nil
+        subscribedOverride = nil
+        actionError = nil
+        showingPlaylists = false
       }
     }
   }
@@ -77,12 +92,13 @@ struct WatchInfoPanel: View {
         } label: {
           Label(signedIn ? (info.likeCountText ?? "Like") : "Sign in to like", systemImage: like == .like ? "hand.thumbsup.fill" : "hand.thumbsup")
         }
+        .disabled(isUpdatingLike || coordinator.phase == .resolving)
         Button {
           setLike(like == .dislike ? .none : .dislike, info: info)
         } label: {
           Label("Dislike", systemImage: like == .dislike ? "hand.thumbsdown.fill" : "hand.thumbsdown")
         }
-        .disabled(!signedIn)
+        .disabled(!signedIn || isUpdatingLike || coordinator.phase == .resolving)
         ShareLink(item: URL(string: "https://youtu.be/\(info.videoID)")!) {
           Label("Share", systemImage: "square.and.arrow.up")
         }
@@ -124,6 +140,7 @@ struct WatchInfoPanel: View {
             Button(subscribed ? "Subscribed" : "Subscribe") {
               toggleSubscription(subscribe, currentlySubscribed: subscribed)
             }
+            .disabled(isUpdatingSubscription || coordinator.phase == .resolving)
             .buttonStyle(.borderedProminent)
             .tint(subscribed ? Color(.systemGray3) : .red)
             .buttonBorderShape(.capsule)
@@ -208,7 +225,9 @@ struct WatchInfoPanel: View {
       if !queued.isEmpty {
         SectionHeader(title: "Queue")
         ForEach(queued) { item in
-          Button { coordinator.jump(to: item) } label: { VideoRow(video: item.video) }
+          Button { coordinator.jump(to: item) } label: {
+            VideoRow(video: item.video, progress: env.watchProgress.entry(for: item.video.videoID))
+          }
             .buttonStyle(.plain)
             .modifier(SwipeToRemove { coordinator.removeFromQueue(item.id) })
             .queueReorder(id: item.id, dragged: $draggedQueueID, coordinator: coordinator)
@@ -220,7 +239,7 @@ struct WatchInfoPanel: View {
           Button {
             coordinator.play(video, queue: [video], present: true)
           } label: {
-            VideoRow(video: video).equatable()
+            VideoRow(video: video, progress: env.watchProgress.entry(for: video.videoID)).equatable()
           }
           .buttonStyle(.plain)
           .contextMenu {
@@ -238,25 +257,43 @@ struct WatchInfoPanel: View {
       env.account.isPresentingSignIn = true
       return
     }
-    let previous = likeOverride
-    likeOverride = status
+    guard !isUpdatingLike, coordinator.phase != .resolving else { return }
+    let current = likeOverride ?? info.likeStatus
+    let params = switch status {
+    case .like: info.likeParams
+    case .dislike: info.dislikeParams
+    case .none: current == .dislike ? info.removeDislikeParams : info.removeLikeParams
+    }
+    isUpdatingLike = true
+    let accountRevision = env.sessionRevision
     Task {
+      defer { isUpdatingLike = false }
       do {
-        try await env.actions.setLike(status, videoID: info.videoID)
+        try await env.actions.setLike(status, videoID: info.videoID, params: params)
+        if env.sessionRevision == accountRevision, coordinator.info?.videoID == info.videoID { likeOverride = status }
       } catch {
-        likeOverride = previous
+        guard env.sessionRevision == accountRevision, coordinator.info?.videoID == info.videoID else { return }
         actionError = FeedModel.describe(error)
       }
     }
   }
 
   private func toggleSubscription(_ state: SubscribeState, currentlySubscribed: Bool) {
-    subscribedOverride = !currentlySubscribed
+    guard !isUpdatingSubscription, coordinator.phase != .resolving else { return }
+    isUpdatingSubscription = true
+    let accountRevision = env.sessionRevision
     Task {
+      defer { isUpdatingSubscription = false }
       do {
-        try await env.actions.setSubscribed(!currentlySubscribed, channelID: state.channelID, params: state.params)
+        try await env.actions.setSubscribed(
+          !currentlySubscribed, channelID: state.channelID,
+          params: currentlySubscribed ? state.unsubscribeParams : state.params
+        )
+        if env.sessionRevision == accountRevision, coordinator.info?.subscribe?.channelID == state.channelID {
+          subscribedOverride = !currentlySubscribed
+        }
       } catch {
-        subscribedOverride = currentlySubscribed
+        guard env.sessionRevision == accountRevision, coordinator.info?.subscribe?.channelID == state.channelID else { return }
         actionError = FeedModel.describe(error)
       }
     }
@@ -270,6 +307,7 @@ struct AddToPlaylistSheet: View {
   @State private var options: [PlaylistOption] = []
   @State private var loading = true
   @State private var error: String?
+  @State private var isUpdating = false
 
   var body: some View {
     NavigationStack {
@@ -280,12 +318,11 @@ struct AddToPlaylistSheet: View {
         ForEach(options) { option in
           Button {
             Task {
+              guard !isUpdating else { return }
+              isUpdating = true
+              defer { isUpdating = false }
               do {
-                if option.containsVideo {
-                  try await env.actions.removeFromPlaylist(videoID: videoID, playlistID: option.playlistID)
-                } else {
-                  try await env.actions.addToPlaylist(videoID: videoID, playlistID: option.playlistID)
-                }
+                try await env.actions.setPlaylistMembership(!option.containsVideo, option: option)
                 await reload()
               } catch {
                 self.error = FeedModel.describe(error)
@@ -298,6 +335,7 @@ struct AddToPlaylistSheet: View {
               if option.containsVideo { Image(systemName: "checkmark").foregroundStyle(.tint) }
             }
           }
+          .disabled(isUpdating)
         }
       }
       .overlay { if loading { ProgressView() } }

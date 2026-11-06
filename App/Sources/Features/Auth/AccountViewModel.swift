@@ -29,7 +29,7 @@ final class AccountViewModel {
     self.cache = cache
   }
 
-  var isSignedIn: Bool { state == .signedIn || state == .validating }
+  var isSignedIn: Bool { state == .signedIn }
 
   /// Launch check: restores the Keychain session and validates it in the background.
   func restore() async {
@@ -83,6 +83,7 @@ final class AccountViewModel {
       return false
     }
     await cache.clearPersonal()
+    state = .signedIn
     await refresh()
     onSessionChange?()
     return true
@@ -100,16 +101,28 @@ final class AccountViewModel {
     onSessionChange?()
   }
 
-  /// Validates the session (`FEwhat_to_watch` must come back signed in) and loads the
-  /// account name/avatar. Never blocks UI.
+  /// Requires explicit signed-in response evidence before enabling account actions.
+  /// The account name/avatar lookup is optional after validation.
   func refresh() async {
     guard var session = await store.current() else {
       state = .signedOut
       return
     }
+    let wasSignedIn = state == .signedIn
+    lastError = nil
     do {
       try await actions.validateSession()
-      if let info = try? await actions.accountInfo() {
+      let info: AccountInfo?
+      do {
+        info = try await actions.accountInfo()
+      } catch MioTubeError.unauthorized {
+        throw MioTubeError.unauthorized
+      } catch {
+        info = nil
+        lastError = FeedModel.describe(error)
+      }
+      guard let active = await store.current(), active.hasSameIdentity(as: session) else { return }
+      if let info {
         name = info.name
         avatarURL = info.avatarURL
         session.name = info.name
@@ -118,10 +131,14 @@ final class AccountViewModel {
       }
       state = .signedIn
     } catch MioTubeError.unauthorized {
+      guard let active = await store.current(), active.hasSameIdentity(as: session) else { return }
       state = .expired
+      lastError = "Your YouTube session has expired."
     } catch {
-      // Offline or transient: keep the session, assume still valid.
-      state = .signedIn
+      guard let active = await store.current(), active.hasSameIdentity(as: session) else { return }
+      // A network failure is not evidence that newly captured cookies authenticate.
+      state = wasSignedIn ? .signedIn : .signedOut
+      lastError = FeedModel.describe(error)
     }
   }
 

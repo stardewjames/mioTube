@@ -5,6 +5,7 @@ import SwiftUI
 struct WatchView: View {
   @Environment(AppEnvironment.self) private var env
   @Environment(\.zoomNamespace) private var namespace
+  @State private var showingChat = false
 
   var body: some View {
     @Bindable var coordinator = env.coordinator
@@ -16,14 +17,30 @@ struct WatchView: View {
             height: coordinator.isFullscreen ? proxy.size.height : proxy.size.width * 9 / 16
           )
         if !coordinator.isFullscreen {
-          NavigationStack {
-            ScrollView {
-              WatchInfoPanel()
-                .padding(16)
+          VStack(spacing: 0) {
+            if coordinator.info?.isLive == true {
+              Picker("Watch panel", selection: $showingChat) {
+                Text("Details").tag(false)
+                Text("Live chat").tag(true)
+              }
+              .pickerStyle(.segmented)
+              .padding(.horizontal, 16)
+              .padding(.vertical, 8)
             }
-            .scrollEdgeEffectStyle(.soft, for: .top)
-            .toolbarVisibility(.hidden, for: .navigationBar)
-            .withRoutes()
+            if showingChat, let info = coordinator.info, info.isLive {
+              LiveChatView(videoID: info.videoID)
+                .id(info.videoID)
+            } else {
+              NavigationStack {
+                ScrollView {
+                  WatchInfoPanel()
+                    .padding(16)
+                }
+                .scrollEdgeEffectStyle(.soft, for: .top)
+                .toolbarVisibility(.hidden, for: .navigationBar)
+                .withRoutes()
+              }
+            }
           }
         }
       }
@@ -36,6 +53,10 @@ struct WatchView: View {
     .interactiveDismissDisabled()
     .modifier(ZoomDestination(id: coordinator.watchZoomSource, namespace: namespace))
     .onAppear { coordinator.watchScreenDidAppear() }
+    .onChange(of: coordinator.current?.id) { showingChat = false }
+    .onChange(of: coordinator.info?.isLive) {
+      if coordinator.info?.isLive != true { showingChat = false }
+    }
     .task {
       // Open from the tapped card, but once on screen retarget the zoom so closing shrinks
       // the player into the mini-player instead of back to the feed card.

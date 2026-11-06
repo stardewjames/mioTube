@@ -22,6 +22,22 @@ final class PlayerEngine {
   private(set) var status: Status = .idle
   private(set) var duration: Double = 0
   private(set) var position: Double = 0
+  private(set) var isLive = false
+  /// The latest contiguous, finite range advertised by the live item, in item-time seconds.
+  private(set) var seekableRange: ClosedRange<Double>?
+  private(set) var allowsLiveSeeking = true
+  var canSeek: Bool {
+    guard status == .ready else { return false }
+    if isLive {
+      guard allowsLiveSeeking, let seekableRange else { return false }
+      return seekableRange.upperBound - seekableRange.lowerBound > 1
+    }
+    return duration > 0
+  }
+  var isAtLiveEdge: Bool {
+    guard isLive, status == .ready, let seekableRange else { return false }
+    return position >= seekableRange.upperBound - 3
+  }
   private(set) var isPlaying = false
   private(set) var isBuffering = false
   private(set) var isPiPActive = false
@@ -54,6 +70,7 @@ final class PlayerEngine {
   @ObservationIgnored private var sessionNotificationTokens: [any NSObjectProtocol] = []
   @ObservationIgnored private var pendingStart: Double = 0
   @ObservationIgnored private var pendingAutoplay = true
+  @ObservationIgnored private var pendingGoLive = false
   @ObservationIgnored private var audioSessionActive = false
   @ObservationIgnored private var hosts = NSHashTable<PlayerHostView>.weakObjects()
   @ObservationIgnored private var qualityCap: QualityCap = .auto
@@ -61,7 +78,8 @@ final class PlayerEngine {
   @ObservationIgnored private(set) var isSeeking = false
   @ObservationIgnored private var loadWatchdog: Task<Void, Never>?
   /// A stream that is not ready by then is treated as failed so another profile can be tried.
-  static let loadTimeout: Duration = .seconds(15)
+  /// 20 s leaves room for a slow HLS manifest/segment fetch on cellular without stalling forever.
+  static let loadTimeout: Duration = .seconds(20)
 
   /// Muted player parked at a skip's landing point.
   private struct Standby {
@@ -103,11 +121,15 @@ final class PlayerEngine {
 
   func load(
     _ source: PlaybackSource, startAt: Double, autoplay: Bool = true, quality: QualityCap, pipAutoStart: Bool,
-    audioTrack: AudioTrack?
+    audioTrack: AudioTrack?, isLive: Bool, allowsLiveSeeking: Bool
   ) {
     tearDownItem()
     discardStandby()
     forwardBufferLimit = nil
+    self.isLive = isLive
+    self.allowsLiveSeeking = allowsLiveSeeking
+    seekableRange = nil
+    pendingGoLive = isLive
     guard let url = source.url else {
       if case .unavailable(let failure) = source {
         status = .failed(failure.reasons.last?.reason ?? "Playback unavailable")
@@ -117,9 +139,9 @@ final class PlayerEngine {
     error = nil
     lastErrorLog = nil
     status = .loading
-    position = startAt
+    position = isLive ? 0 : startAt
     duration = 0
-    pendingStart = startAt
+    pendingStart = isLive ? 0 : startAt
     pendingAutoplay = autoplay
     self.audioTrack = audioTrack
     let asset = AVURLAsset(url: url)
@@ -136,8 +158,9 @@ final class PlayerEngine {
     loadWatchdog = Task { [weak self] in
       try? await Task.sleep(for: Self.loadTimeout)
       guard !Task.isCancelled, let self, self.status == .loading else { return }
-      self.fail("Stream did not start within 15 s")
+      self.fail("Stream did not start within \(Self.loadTimeout.components.seconds) s")
     }
+    onStateChange?()
   }
 
   func stop() {
@@ -150,6 +173,9 @@ final class PlayerEngine {
     status = .idle
     position = 0
     duration = 0
+    isLive = false
+    seekableRange = nil
+    pendingGoLive = false
     isPlaying = false
   }
 
@@ -192,6 +218,22 @@ final class PlayerEngine {
     seek(to: seconds, toleranceBefore: tolerance, toleranceAfter: tolerance)
   }
 
+  /// Starts at the newest advertised media, never at the item's (often indefinite) duration.
+  /// If the manifest is not ready yet, the first usable seekable-range update completes it.
+  func goLive() {
+    guard isLive else { return }
+    pendingGoLive = true
+    seekToPendingLiveEdge()
+  }
+
+  private func seekToPendingLiveEdge() {
+    guard pendingGoLive, status == .ready, let seekableRange else { return }
+    let length = seekableRange.upperBound - seekableRange.lowerBound
+    let target = seekableRange.upperBound - min(1, length / 2)
+    pendingGoLive = false
+    performSeek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+  }
+
   /// Jumps past a SponsorBlock segment: never lands before `seconds` (which would re-enter the
   /// segment) but may snap up to 1 s later to the next keyframe, so long skips are fast.
   func seekPast(_ seconds: Double) {
@@ -202,7 +244,21 @@ final class PlayerEngine {
   /// ticks are dropped so SponsorBlock doesn't re-trigger the same skip (a seek storm that
   /// stalls playback on long segments). Only the latest seek's completion ends the window.
   private func seek(to seconds: Double, toleranceBefore: CMTime, toleranceAfter: CMTime) {
-    let clamped = max(0, duration > 0 ? min(seconds, duration - 0.25) : seconds)
+    guard seconds.isFinite else { return }
+    if isLive {
+      guard canSeek, let seekableRange else { return }
+      let edge = seekableRange.upperBound - min(1, (seekableRange.upperBound - seekableRange.lowerBound) / 2)
+      let clamped = min(max(seconds, seekableRange.lowerBound), edge)
+      pendingGoLive = false
+      // Unlimited keyframe tolerance could place a live seek outside the DVR window.
+      performSeek(to: clamped, toleranceBefore: .zero, toleranceAfter: .zero)
+    } else {
+      let clamped = max(0, duration > 0 ? min(seconds, duration - 0.25) : seconds)
+      performSeek(to: clamped, toleranceBefore: toleranceBefore, toleranceAfter: toleranceAfter)
+    }
+  }
+
+  private func performSeek(to clamped: Double, toleranceBefore: CMTime, toleranceAfter: CMTime) {
     position = clamped
     seekGeneration += 1
     let generation = seekGeneration
@@ -231,7 +287,7 @@ final class PlayerEngine {
 
   /// Starts buffering `target` (a skip's landing point) in a muted standby player.
   func prepareStandby(at target: Double) {
-    guard let asset = currentAsset, status == .ready, canSwapPlayers else { return }
+    guard !isLive, let asset = currentAsset, status == .ready, canSwapPlayers else { return }
     if let standby, abs(standby.target - target) < 0.5 { return }
     discardStandby()
     let item = AVPlayerItem(asset: asset)
@@ -405,16 +461,27 @@ final class PlayerEngine {
   }
 
   private func tick(_ seconds: Double) {
+    if let item = player.currentItem { updateSeekableRange(from: item) }
     guard seconds.isFinite, !isSeeking else { return }
     position = seconds
     if let item = player.currentItem {
       let total = item.duration.seconds
-      if total.isFinite, total > 0, total != duration { duration = total }
+      if total.isFinite, total > 0, total != duration {
+        duration = total
+        onStateChange?()
+      }
     }
     onTick?(seconds)
   }
 
   private func observe(_ item: AVPlayerItem) {
+    itemObservations.append(item.observe(\.seekableTimeRanges, options: [.initial, .new]) { @Sendable [weak self] item, _ in
+      let id = ObjectIdentifier(item)
+      Task { @MainActor in
+        guard let self, let loaded = self.player.currentItem, ObjectIdentifier(loaded) == id else { return }
+        self.updateSeekableRange(from: loaded)
+      }
+    })
     let id = ObjectIdentifier(item)
     itemObservations.append(item.observe(\.status, options: [.new]) { @Sendable [weak self] item, _ in
       let status = item.status
@@ -434,6 +501,22 @@ final class PlayerEngine {
       let message = event.map { "\($0.errorStatusCode) \($0.errorComment ?? "")" }
       MainActor.assumeIsolated { self?.lastErrorLog = message }
     })
+  }
+
+  private func updateSeekableRange(from item: AVPlayerItem) {
+    guard isLive else { return }
+    let couldSeek = canSeek
+    var latest: ClosedRange<Double>?
+    for value in item.seekableTimeRanges {
+      let range = value.timeRangeValue
+      let start = range.start.seconds
+      let end = range.end.seconds
+      guard start.isFinite, end.isFinite, start >= 0, end > start else { continue }
+      if latest == nil || end > latest!.upperBound { latest = start...end }
+    }
+    seekableRange = latest
+    seekToPendingLiveEdge()
+    if couldSeek != canSeek { onStateChange?() }
   }
 
   private func itemStatusChanged(_ item: ObjectIdentifier, _ itemStatus: AVPlayerItem.Status, message: String?) {
@@ -460,7 +543,9 @@ final class PlayerEngine {
       guard player.currentItem === item, status == .loading else { return }
       loadWatchdog?.cancel()
       status = .ready
-      if pendingStart > 0 {
+      if isLive {
+        updateSeekableRange(from: item)
+      } else if pendingStart > 0 {
         seek(to: pendingStart)
         pendingStart = 0
       }

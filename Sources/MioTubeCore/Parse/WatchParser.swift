@@ -29,12 +29,14 @@ public struct SubscribeState: Sendable, Hashable {
   public let channelID: String
   /// `subscribeEndpoint.params` when YouTube supplied one (signed-in responses); sent verbatim.
   public let params: String?
+  public let unsubscribeParams: String?
   public let isSubscribed: Bool
 
-  public init(channelID: String, params: String?, isSubscribed: Bool) {
+  public init(channelID: String, params: String?, unsubscribeParams: String? = nil, isSubscribed: Bool) {
     self.channelID = channelID
     self.params = params
     self.isSubscribed = isSubscribed
+    self.unsubscribeParams = unsubscribeParams
   }
 }
 
@@ -58,6 +60,10 @@ public struct WatchInfo: Sendable, Hashable {
   public var captionTracks: [CaptionTrack]
   public var isLive: Bool
   public var likeStatus: LikeStatus
+  public var likeParams: String?
+  public var dislikeParams: String?
+  public var removeLikeParams: String?
+  public var removeDislikeParams: String?
   public var subscribe: SubscribeState?
   public var durationSeconds: Double?
   /// Ad renderers removed from the `next` response (Diagnostics).
@@ -119,10 +125,14 @@ public enum WatchParser {
         channelID: channelID, title: details?["author"]?.string ?? "", thumbnailURL: nil, subscriberText: nil, handle: ""
       )
     }
-    info.durationSeconds = details?["lengthSeconds"]?.double.flatMap { $0 > 0 ? $0 : nil }
-    info.isLive = details?["isLive"]?.bool ?? details?["isLiveContent"]?.bool.flatMap { $0 && info.durationSeconds == nil ? true : nil } ?? false
+    info.durationSeconds = details?["lengthSeconds"]?.double.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+    // Explicit player flags distinguish an active broadcast from its finished archive.
+    // `isLiveContent` describes both, so only use it without a finite VOD duration.
+    info.isLive = details?["isLive"]?.bool
+      ?? player["microformat", "playerMicroformatRenderer", "liveBroadcastDetails", "isLiveNow"]?.bool
+      ?? (info.isLive || (details?["isLiveContent"]?.bool == true && info.durationSeconds == nil))
     info.captionTracks = captionTracks(player)
-    info.chapters = chapters(next, videoID: videoID)
+    info.chapters = info.isLive ? [] : chapters(next, videoID: videoID)
     (info.related, info.relatedContinuation) = related(next, excluding: videoID)
     return info
   }
@@ -136,6 +146,11 @@ public enum WatchParser {
     for button in buttons {
       guard let segmented = button["segmentedLikeDislikeButtonViewModel"] else { continue }
       let like = segmented["likeButtonViewModel", "likeButtonViewModel"]
+      let dislike = segmented["dislikeButtonViewModel", "dislikeButtonViewModel"]
+      info.likeParams = like?.first(key: "likeParams")?.string ?? info.likeParams
+      info.removeLikeParams = like?.first(key: "removeLikeParams")?.string ?? info.removeLikeParams
+      info.dislikeParams = dislike?.first(key: "dislikeParams")?.string ?? info.dislikeParams
+      info.removeDislikeParams = dislike?.first(key: "removeLikeParams")?.string ?? info.removeDislikeParams
       info.likeCountText = like?["toggleButtonViewModel", "toggleButtonViewModel", "defaultButtonViewModel", "buttonViewModel", "title"]?.string
       switch like?["likeStatusEntity", "likeStatus"]?.string {
       case "LIKE": info.likeStatus = .like
@@ -163,7 +178,8 @@ public enum WatchParser {
     if let button, let channelID = button["channelId"]?.string ?? info.channel?.channelID {
       info.subscribe = SubscribeState(
         channelID: channelID,
-        params: button["onSubscribeEndpoints", "0", "subscribeEndpoint", "params"]?.string,
+        params: button["onSubscribeEndpoints"]?.first(key: "subscribeEndpoint")?["params"]?.string,
+        unsubscribeParams: button["onUnsubscribeEndpoints"]?.first(key: "unsubscribeEndpoint")?["params"]?.string,
         isSubscribed: button["subscribed"]?.bool ?? false
       )
     }
@@ -292,7 +308,7 @@ public enum CommentsParser {
       if let thread = item["commentThreadRenderer"] {
         if let comment = threadComment(thread, entities: entities) { comments.append(comment) }
       } else if let reply = item["commentViewModel"] {
-        if let comment = viewModelComment(reply, entities: entities, repliesContinuation: nil) { comments.append(comment) }
+        if let comment = viewModelComment(reply["commentViewModel"] ?? reply, entities: entities, repliesContinuation: nil) { comments.append(comment) }
       } else if let renderer = item["commentRenderer"] {
         if let comment = legacyComment(renderer, repliesContinuation: nil) { comments.append(comment) }
       } else if let more = item["continuationItemRenderer"] {

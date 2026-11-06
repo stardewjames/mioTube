@@ -40,8 +40,7 @@ struct SignInSheet: View {
   /// `web_safari` UA by default; `mweb` when Google rejects the first one.
   private var userAgent: String {
     let id = useAlternateAgent ? "mweb" : "web_safari"
-    let raw = env.catalog.profile(id)?.userAgent ?? ""
-    return raw.replacingOccurrences(of: ",gzip(gfe)", with: "")
+    return env.catalog.profile(id)?.httpUserAgent ?? ""
   }
 }
 
@@ -82,7 +81,8 @@ struct SignInWebView: UIViewRepresentable {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-      guard !finished, let host = webView.url?.host, host.hasSuffix("youtube.com") else { return }
+      guard !finished, let host = webView.url?.host,
+            GoogleSession.matchesDomain(host, root: "youtube.com") else { return }
       let store = webView.configuration.websiteDataStore.httpCookieStore
       Task { @MainActor in
         let cookies = await store.allCookies()
@@ -95,20 +95,30 @@ struct SignInWebView: UIViewRepresentable {
     /// YouTube-domain cookies plus the classic Google auth cookies; expiry = earliest auth
     /// cookie expiry (fallback now + 30 days).
     static func capture(_ cookies: [HTTPCookie]) -> ([String: String], Date)? {
-      var result: [String: String] = [:]
-      var expiry: Date?
+      var selected: [String: HTTPCookie] = [:]
+      let now = Date()
       for cookie in cookies {
         let domain = cookie.domain.lowercased()
-        let isYouTube = domain.contains("youtube.com")
-        let isGoogleAuth = domain.hasSuffix("google.com") && GoogleSession.googleDomainCookieNames.contains(cookie.name)
-        guard isYouTube || isGoogleAuth else { continue }
-        if result[cookie.name] == nil || isYouTube { result[cookie.name] = cookie.value }
-        if GoogleSession.authCookieNames.contains(cookie.name), let date = cookie.expiresDate {
-          expiry = expiry.map { min($0, date) } ?? date
+        let host = domain.hasPrefix(".") ? String(domain.dropFirst()) : domain
+        let isYouTube = host == "www.youtube.com" || (host == "youtube.com" && domain.hasPrefix("."))
+        let isGoogleAuth = (host == "google.com")
+          && GoogleSession.googleDomainCookieNames.contains(cookie.name)
+        guard cookie.path == "/", isYouTube || isGoogleAuth,
+              cookie.expiresDate.map({ $0 > now }) ?? true else { continue }
+        if let existing = selected[cookie.name] {
+          guard isYouTube else { continue }
+          let existingHost = existing.domain.hasPrefix(".") ? String(existing.domain.dropFirst()) : existing.domain
+          if existingHost == "www.youtube.com", host != existingHost { continue }
         }
+        selected[cookie.name] = cookie
       }
-      guard result["SAPISID"] != nil || result["__Secure-3PAPISID"] != nil else { return nil }
-      return (result, expiry ?? Date().addingTimeInterval(30 * 86_400))
+      let result = selected.mapValues(\.value)
+      let expiry = selected.values.reduce(nil as Date?) { earliest, cookie in
+        guard GoogleSession.authCookieNames.contains(cookie.name), let date = cookie.expiresDate else { return earliest }
+        return earliest.map { min($0, date) } ?? date
+      } ?? now.addingTimeInterval(30 * 86_400)
+      guard GoogleSession(cookies: result, expiresAt: expiry).hasAuthCookie else { return nil }
+      return (result, expiry)
     }
   }
 }

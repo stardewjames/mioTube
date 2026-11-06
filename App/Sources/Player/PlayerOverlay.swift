@@ -242,8 +242,8 @@ struct PlayerOverlay: View {
   private var transport: some View {
     GlassEffectContainer(spacing: metrics.spacing) {
       HStack(spacing: metrics.spacing) {
-        transportButton("backward.end.fill", label: "Previous") { coordinator.previous() }
-        transportButton("gobackward.10", label: "Back 10 seconds") { engine.skip(by: -10) }
+        transportButton("backward.end.fill", label: "Previous", enabled: !engine.isLive || coordinator.hasPrevious) { coordinator.previous() }
+        transportButton("gobackward.10", label: "Back 10 seconds", enabled: engine.canSeek) { engine.skip(by: -10) }
 
         Button { engine.togglePlayPause(); touch() } label: {
           ZStack {
@@ -262,7 +262,7 @@ struct PlayerOverlay: View {
         .glassControl()
         .accessibilityLabel(isLoading ? "Loading, pause" : (engine.isPlaying ? "Pause" : "Play"))
 
-        transportButton("goforward.10", label: "Forward 10 seconds") { engine.skip(by: 10) }
+        transportButton("goforward.10", label: "Forward 10 seconds", enabled: engine.canSeek) { engine.skip(by: 10) }
         transportButton("forward.end.fill", label: "Next", enabled: coordinator.hasNext) { coordinator.advance(.user) }
       }
     }
@@ -270,38 +270,54 @@ struct PlayerOverlay: View {
 
   private var scrubber: some View {
     let shown = scrubbing ? scrubValue : engine.position
+    let lowerBound = engine.isLive ? (engine.seekableRange?.lowerBound ?? 0) : 0
+    let timelineDuration = engine.isLive
+      ? (engine.seekableRange.map { $0.upperBound - $0.lowerBound } ?? 0) : engine.duration
     return VStack(spacing: coordinator.isFullscreen ? 6 : 2) {
       sponsorActions
       ScrubberBar(
-        duration: engine.duration,
-        position: shown,
+        duration: timelineDuration,
+        position: shown - lowerBound,
         segments: coordinator.scrubberSegments,
-        chapters: coordinator.info?.chapters ?? [],
+        chapters: engine.isLive ? [] : (coordinator.info?.chapters ?? []),
         isScrubbing: scrubbing,
-        isEnabled: coordinator.info?.isLive != true && engine.duration > 0,
+        isEnabled: engine.canSeek,
         height: coordinator.isFullscreen ? 5 : 4,
         onScrub: { value in
-          scrubValue = value
+          scrubValue = lowerBound + value
           scrubbing = true
           touch()
         },
         onCommit: { value in
-          engine.seek(to: value, precise: true)
+          engine.seek(to: lowerBound + value, precise: true)
           scrubbing = false
           touch()
         }
       )
       HStack(spacing: 6) {
-        Text(Format.duration(shown)).monospacedDigit()
+        if engine.isLive {
+          Button {
+            engine.goLive()
+            touch()
+          } label: {
+            if engine.isAtLiveEdge {
+              LiveBadge()
+            } else {
+              Label("Go live", systemImage: "forward.end.fill")
+            }
+          }
+          .disabled(engine.seekableRange == nil || engine.isAtLiveEdge)
+          .accessibilityLabel(engine.isAtLiveEdge ? "At live edge" : "Go live")
+        } else {
+          Text(Format.duration(shown)).monospacedDigit()
+        }
         if scrubbing, let segment = coordinator.scrubberSegments.first(where: { $0.action != .poi && $0.start <= shown && shown < $0.end }) {
           SponsorLabel(category: segment.category)
         } else if coordinator.fullVideoSponsored {
           Label("Sponsored video", systemImage: "dollarsign.circle").labelStyle(.iconOnly).foregroundStyle(.yellow)
         }
         Spacer()
-        if coordinator.info?.isLive == true {
-          LiveBadge()
-        } else {
+        if !engine.isLive {
           Text(Format.duration(engine.duration)).monospacedDigit()
         }
         Button {
@@ -410,6 +426,7 @@ struct PlayerOverlay: View {
   }
 
   private func doubleTap(forward: Bool) {
+    guard engine.canSeek else { return }
     engine.skip(by: forward ? 10 : -10)
     let hud = SeekHUD(forward: forward)
     seekHUD = hud
@@ -512,6 +529,7 @@ struct ScrubberBar: View {
     .accessibilityLabel("Playback position")
     .accessibilityValue(Format.duration(position))
     .accessibilityAdjustableAction { direction in
+      guard isEnabled else { return }
       switch direction {
       case .increment: onCommit(min(position + 10, duration))
       case .decrement: onCommit(max(position - 10, 0))

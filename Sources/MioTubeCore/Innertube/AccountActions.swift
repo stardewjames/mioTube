@@ -14,12 +14,21 @@ public struct PlaylistOption: Sendable, Hashable, Identifiable {
   public let playlistID: String
   public let title: String
   public let containsVideo: Bool
+  /// Server-issued edit bodies retain opaque params and playlist item set IDs.
+  public let addRequest: JSONValue?
+  public let removeRequest: JSONValue?
+  fileprivate var expectedSession: GoogleSession?
   public var id: String { playlistID }
 
-  public init(playlistID: String, title: String, containsVideo: Bool) {
+  public init(
+    playlistID: String, title: String, containsVideo: Bool,
+    addRequest: JSONValue? = nil, removeRequest: JSONValue? = nil
+  ) {
     self.playlistID = playlistID
     self.title = title
     self.containsVideo = containsVideo
+    self.addRequest = addRequest
+    self.removeRequest = removeRequest
   }
 }
 
@@ -31,73 +40,127 @@ public struct AccountActions: Sendable {
     self.client = client
   }
 
-  private func requireSession() async throws {
-    guard await client.hasSession() else { throw MioTubeError.notSignedIn }
+  private func requireSession() async throws -> GoogleSession {
+    guard let session = await client.session.current(), session.hasAuthCookie else {
+      throw MioTubeError.notSignedIn
+    }
+    guard session.expiresAt > Date() else { throw MioTubeError.unauthorized }
+    return session
   }
 
-  public func setLike(_ status: LikeStatus, videoID: String) async throws {
-    try await requireSession()
+  public func setLike(_ status: LikeStatus, videoID: String, params: String? = nil) async throws {
+    let session = try await requireSession()
     let endpoint = switch status {
     case .like: "like/like"
     case .dislike: "like/dislike"
     case .none: "like/removelike"
     }
-    _ = try await client.post(endpoint, ["target": ["videoId": .string(videoID)]], retryable: false)
+    var body: [String: JSONValue] = ["target": ["videoId": .string(videoID)]]
+    if let params { body["params"] = .string(params) }
+    let json = try await client.post(endpoint, .object(body), retryable: false, expectedSession: session)
+    try Self.checkMutation(json)
   }
 
-  /// `params` comes from the watch page's `subscribeButtonRenderer`; omitted when absent.
+  /// Pass the matching subscribe or unsubscribe endpoint's params verbatim.
   public func setSubscribed(_ subscribed: Bool, channelID: String, params: String?) async throws {
-    try await requireSession()
+    let session = try await requireSession()
     var body: [String: JSONValue] = ["channelIds": [.string(channelID)]]
-    if subscribed, let params { body["params"] = .string(params) }
-    _ = try await client.post(
-      subscribed ? "subscription/subscribe" : "subscription/unsubscribe", .object(body), retryable: false
+    if let params { body["params"] = .string(params) }
+    let json = try await client.post(
+      subscribed ? "subscription/subscribe" : "subscription/unsubscribe", .object(body),
+      retryable: false, expectedSession: session
     )
+    try Self.checkMutation(json)
+    if let update = json.first(key: "updateSubscribeButtonAction"),
+       update["channelId"]?.string == channelID,
+       let actual = update["subscribed"]?.bool, actual != subscribed {
+      throw MioTubeError.invalidResponse("YouTube did not change the subscription.")
+    }
   }
 
   public func playlistOptions(videoID: String) async throws -> [PlaylistOption] {
-    try await requireSession()
-    let json = try await client.post("playlist/get_add_to_playlist", ["videoIds": [.string(videoID)]])
-    return Self.parsePlaylistOptions(json)
+    let session = try await requireSession()
+    let json = try await client.post(
+      "playlist/get_add_to_playlist", ["videoIds": [.string(videoID)]], expectedSession: session
+    )
+    return Self.parsePlaylistOptions(json, expectedSession: session)
   }
 
-  public func addToPlaylist(videoID: String, playlistID: String) async throws {
-    try await requireSession()
-    _ = try await client.post("browse/edit_playlist", [
-      "playlistId": .string(playlistID),
-      "actions": [["action": "ACTION_ADD_VIDEO", "addedVideoId": .string(videoID)]],
-    ], retryable: false)
-  }
-
-  public func removeFromPlaylist(videoID: String, playlistID: String) async throws {
-    try await requireSession()
-    _ = try await client.post("browse/edit_playlist", [
-      "playlistId": .string(playlistID),
-      "actions": [["action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID", "removedVideoId": .string(videoID)]],
-    ], retryable: false)
+  /// Uses the selected option's actual service endpoint, not an inferred video-ID removal.
+  public func setPlaylistMembership(_ containsVideo: Bool, option: PlaylistOption) async throws {
+    let session = try await requireSession()
+    if let expected = option.expectedSession, !session.hasSameIdentity(as: expected) {
+      throw CancellationError()
+    }
+    guard let body = containsVideo ? option.addRequest : option.removeRequest,
+          body["playlistId"]?.string == option.playlistID,
+          body["actions"]?.array?.isEmpty == false else {
+      throw MioTubeError.invalidResponse("YouTube did not provide an editable playlist option.")
+    }
+    let json = try await client.post("browse/edit_playlist", body, retryable: false, expectedSession: session)
+    try Self.checkMutation(json)
+    guard json["status"]?.string == "STATUS_SUCCEEDED" else {
+      throw MioTubeError.invalidResponse("YouTube did not confirm the playlist update.")
+    }
   }
 
   /// Name + avatar of the signed-in account.
   public func accountInfo() async throws -> AccountInfo {
-    try await requireSession()
-    return Self.parseAccountInfo(try await client.post("account/account_menu", [:]))
+    let session = try await requireSession()
+    let json = try await client.post("account/account_menu", [:], expectedSession: session)
+    try Self.requireSignedInResponse(json)
+    guard json.first(key: "activeAccountHeaderRenderer") != nil else {
+      throw MioTubeError.invalidResponse("YouTube did not return the active account.")
+    }
+    return Self.parseAccountInfo(json)
   }
 
   /// Throws `.unauthorized` when the cookies no longer authenticate.
   public func validateSession() async throws {
-    try await requireSession()
-    _ = try await client.post("browse", ["browseId": "FEwhat_to_watch"])
+    let session = try await requireSession()
+    try Self.requireSignedInResponse(
+      try await client.post("browse", ["browseId": "FEwhat_to_watch"], expectedSession: session)
+    )
   }
 
-  static func parsePlaylistOptions(_ json: JSONValue) -> [PlaylistOption] {
+  private static func requireSignedInResponse(_ json: JSONValue) throws {
+    guard json["responseContext", "mainAppWebResponseContext", "loggedOut"]?.bool == false else {
+      throw MioTubeError.unauthorized
+    }
+  }
+
+  private static func checkMutation(_ json: JSONValue) throws {
+    if json["responseContext", "mainAppWebResponseContext", "loggedOut"]?.bool == true {
+      throw MioTubeError.unauthorized
+    }
+    if let status = json["status"]?.string, status != "STATUS_SUCCEEDED" {
+      throw MioTubeError.invalidResponse("YouTube rejected the update (\(status)).")
+    }
+    var failure: String?
+    RendererTree.walk(json) { key, value in
+      if key == "alertRenderer", value["type"]?.string == "ERROR" {
+        failure = value["text"]?.text ?? "YouTube rejected the update."
+      }
+      if key == "modalWithTitleAndButtonRenderer" {
+        failure = value["content"]?.text ?? value["title"]?.text ?? "YouTube requires another action."
+      }
+    }
+    if let failure { throw MioTubeError.invalidResponse(failure) }
+  }
+
+  static func parsePlaylistOptions(_ json: JSONValue, expectedSession: GoogleSession? = nil) -> [PlaylistOption] {
     var options: [PlaylistOption] = []
     RendererTree.walk(json) { key, value in
       guard key == "playlistAddToOptionRenderer", let id = value["playlistId"]?.string else { return }
-      options.append(PlaylistOption(
+      var option = PlaylistOption(
         playlistID: id,
         title: value["title"]?.text ?? id,
-        containsVideo: value["containsSelectedVideos"]?.string == "ALL"
-      ))
+        containsVideo: value["containsSelectedVideos"]?.string == "ALL",
+        addRequest: value["addToPlaylistServiceEndpoint", "playlistEditEndpoint"],
+        removeRequest: value["removeFromPlaylistServiceEndpoint", "playlistEditEndpoint"]
+      )
+      option.expectedSession = expectedSession
+      options.append(option)
     }
     return options
   }

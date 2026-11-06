@@ -106,6 +106,29 @@ public struct RetryPolicy: Sendable {
   }
 }
 
+/// A scope-free explicit cookie jar cannot safely be reapplied to another origin.
+final class CredentialRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+    newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void
+  ) {
+    guard let source = response.url, let target = request.url else {
+      completionHandler(nil)
+      return
+    }
+    let sameOrigin = source.scheme?.lowercased() == target.scheme?.lowercased()
+      && source.host?.lowercased() == target.host?.lowercased()
+      && (source.port ?? (source.scheme?.lowercased() == "https" ? 443 : 80))
+        == (target.port ?? (target.scheme?.lowercased() == "https" ? 443 : 80))
+    let original = task.originalRequest ?? request
+    let hasCredentials = original.value(forHTTPHeaderField: "Cookie") != nil
+      || original.value(forHTTPHeaderField: "Authorization") != nil
+      || original.value(forHTTPHeaderField: "X-Goog-Visitor-Id") != nil
+    let isPost = original.httpMethod == "POST" || request.httpMethod == "POST"
+    completionHandler(sameOrigin || (!hasCredentials && !isPost) ? request : nil)
+  }
+}
+
 public actor URLSessionTransport: HTTPTransport {
   private let session: URLSession
   private let interceptors: [any RequestInterceptor]
@@ -127,12 +150,14 @@ public actor URLSessionTransport: HTTPTransport {
     // Cookies are attached explicitly per request (session cookies come from the Keychain).
     config.httpShouldSetCookies = false
     config.httpCookieAcceptPolicy = .never
-    self.session = URLSession(configuration: config)
+    config.httpCookieStorage = nil
+    self.session = URLSession(configuration: config, delegate: CredentialRedirectGuard(), delegateQueue: nil)
     self.interceptors = interceptors
     self.policy = policy
   }
 
   public func send(_ r: HTTPRequest) async throws -> HTTPResponse {
+    try Task.checkCancellation()
     var request = r
     for interceptor in interceptors {
       await interceptor.intercept(&request)
@@ -140,6 +165,7 @@ public actor URLSessionTransport: HTTPTransport {
     let urlRequest = Self.makeURLRequest(request)
     var retry = 0
     while true {
+      try Task.checkCancellation()
       do {
         let response = try await perform(urlRequest)
         if (200..<300).contains(response.status) { return response }
@@ -151,6 +177,7 @@ public actor URLSessionTransport: HTTPTransport {
         }
         throw MioTubeError.http(status: response.status, body: String(decoding: response.data.prefix(2048), as: UTF8.self))
       } catch let error as URLError {
+        if Task.isCancelled || error.code == .cancelled { throw CancellationError() }
         if request.retryable, RetryPolicy.isRetryable(error), let delay = policy.delay(forRetry: retry, retryAfterHeader: nil) {
           retry += 1
           try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -172,23 +199,12 @@ public actor URLSessionTransport: HTTPTransport {
   }
 
   private func perform(_ request: URLRequest) async throws -> HTTPResponse {
-    try await withCheckedThrowingContinuation { continuation in
-      let task = session.dataTask(with: request) { data, response, error in
-        if let error {
-          continuation.resume(throwing: (error as? URLError) ?? URLError(.unknown))
-          return
-        }
-        guard let http = response as? HTTPURLResponse else {
-          continuation.resume(throwing: URLError(.badServerResponse))
-          return
-        }
-        var headers: [String: String] = [:]
-        for (key, value) in http.allHeaderFields {
-          if let key = key as? String, let value = value as? String { headers[key] = value }
-        }
-        continuation.resume(returning: HTTPResponse(status: http.statusCode, data: data ?? Data(), headers: headers))
-      }
-      task.resume()
+    let (data, response) = try await session.data(for: request)
+    guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+    var headers: [String: String] = [:]
+    for (key, value) in http.allHeaderFields {
+      if let key = key as? String, let value = value as? String { headers[key] = value }
     }
+    return HTTPResponse(status: http.statusCode, data: data, headers: headers)
   }
 }

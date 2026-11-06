@@ -2,26 +2,32 @@ import Foundation
 
 /// YouTube's cookie-bound `Authorization` header.
 public enum SapisidAuth {
-  /// `SAPISIDHASH <ts>_<sha1("<ts> <SAPISID> <origin>")>`, followed by the `SAPISID1PHASH` /
-  /// `SAPISID3PHASH` variants when the matching `__Secure-*PAPISID` cookies exist (what
-  /// youtube.com itself sends). Nil when no SAPISID-family cookie is present.
+  /// Each available SAPISID-family secret signs the request origin independently.
+  /// The optional user-session binding is the `u` variant used by YouTube web accounts.
   public static func header(
     cookies: [String: String],
     origin: String = "https://www.youtube.com",
-    timestamp: Int = .init(Date().timeIntervalSince1970)
+    timestamp: Int = .init(Date().timeIntervalSince1970),
+    userSessionID: String? = nil
   ) -> String? {
-    guard let sapisid = cookies["SAPISID"] ?? cookies["__Secure-3PAPISID"] else { return nil }
-    var parts = ["SAPISIDHASH \(hash(timestamp, sapisid, origin))"]
-    if let first = cookies["__Secure-1PAPISID"] {
-      parts.append("SAPISID1PHASH \(hash(timestamp, first, origin))")
+    let primary = cookies["SAPISID"].flatMap { $0.isEmpty ? nil : $0 }
+      ?? cookies["__Secure-3PAPISID"].flatMap { $0.isEmpty ? nil : $0 }
+    let secrets = [
+      ("SAPISIDHASH", primary),
+      ("SAPISID1PHASH", cookies["__Secure-1PAPISID"]),
+      ("SAPISID3PHASH", cookies["__Secure-3PAPISID"]),
+    ]
+    let parts = secrets.compactMap { scheme, secret -> String? in
+      guard let secret, !secret.isEmpty else { return nil }
+      return "\(scheme) \(hash(timestamp, secret, origin, userSessionID: userSessionID))"
     }
-    if let third = cookies["__Secure-3PAPISID"], cookies["SAPISID"] != nil || cookies["__Secure-1PAPISID"] != nil {
-      parts.append("SAPISID3PHASH \(hash(timestamp, third, origin))")
-    }
-    return parts.joined(separator: " ")
+    return parts.isEmpty ? nil : parts.joined(separator: " ")
   }
 
-  static func hash(_ timestamp: Int, _ secret: String, _ origin: String) -> String {
-    "\(timestamp)_\(sha1Hex("\(timestamp) \(secret) \(origin)"))"
+  static func hash(_ timestamp: Int, _ secret: String, _ origin: String, userSessionID: String? = nil) -> String {
+    if let userSessionID, !userSessionID.isEmpty {
+      return "\(timestamp)_\(sha1Hex("\(userSessionID) \(timestamp) \(secret) \(origin)"))_u"
+    }
+    return "\(timestamp)_\(sha1Hex("\(timestamp) \(secret) \(origin)"))"
   }
 }

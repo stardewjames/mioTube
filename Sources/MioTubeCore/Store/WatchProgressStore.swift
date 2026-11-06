@@ -10,6 +10,18 @@ public struct WatchProgress: Codable, Sendable, Hashable {
     self.duration = duration
     self.updatedAt = updatedAt
   }
+
+  /// Played share of the video, clamped to 0...1.
+  public var fraction: Double {
+    guard duration > 0 else { return 0 }
+    return min(max(position / duration, 0), 1)
+  }
+
+  /// Watched once 90% has played, or the final 30 s are reached after the halfway point.
+  public var isFinished: Bool {
+    guard duration > 0 else { return false }
+    return fraction >= 0.9 || (fraction >= 0.5 && position >= duration - 30)
+  }
 }
 
 /// Resume positions in `progress.json`, keyed by video id.
@@ -33,6 +45,11 @@ public actor WatchProgressStore {
     load()[videoID]
   }
 
+  /// Every retained entry; used to seed the in-memory index that feeds render from.
+  public func snapshot() -> [String: WatchProgress] {
+    load()
+  }
+
   /// Saved position when it is meaningfully inside the video (30 s from either end), else 0.
   public func resumePosition(for videoID: String) -> Double {
     guard let entry = load()[videoID] else { return 0 }
@@ -40,7 +57,8 @@ public actor WatchProgressStore {
   }
 
   public static func resumePosition(_ entry: WatchProgress) -> Double {
-    entry.position > 30 && entry.position < entry.duration - 30 ? entry.position : 0
+    guard !entry.isFinished else { return 0 }
+    return entry.position > 30 && entry.position < entry.duration - 30 ? entry.position : 0
   }
 
   public func record(videoID: String, position: Double, duration: Double, at date: Date = Date()) {

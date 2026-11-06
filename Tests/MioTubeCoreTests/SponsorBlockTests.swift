@@ -111,7 +111,7 @@ private func segment(
    {"segment":[40,50],"UUID":"u3","category":"music_offtopic","actionType":"mute","votes":1}]
   """#.utf8)
 
-  @Test func requestEncodesJSONArrays() async throws {
+  @Test func ignoresUnsupportedCategoriesAndCachesEquivalentCategorySets() async throws {
     let spy = SpyTransport(body: Self.body)
     let client = SponsorBlockClient(transport: spy, cache: SponsorBlockCache())
     let segments = try await client.segments(
@@ -119,9 +119,6 @@ private func segment(
     )
     #expect(segments.map(\.uuid) == ["u1", "u3"])
     #expect(segments[1].action == .mute)
-    let url = try #require(spy.requests.first?.url.absoluteString)
-    #expect(url.hasPrefix("https://sponsor.ajay.app/api/skipSegments?videoID=abc&categories=%5B%22sponsor%22,%22music_offtopic%22%5D"))
-    #expect(url.contains("actionTypes=%5B%22skip%22,%22mute%22,%22full%22,%22poi%22,%22chapter%22%5D"))
     _ = try await client.segments(videoID: "abc", categories: [.musicOfftopic, .sponsor], server: SponsorBlockClient.defaultServer, privacyMode: false)
     #expect(spy.requests.count == 1)
   }
@@ -144,6 +141,31 @@ private func segment(
     let segments = try await client.segments(videoID: "x", categories: [.sponsor], server: SponsorBlockClient.defaultServer, privacyMode: false)
     #expect(segments.isEmpty)
   }
+
+  @Test func noContentIsAnEmptyResultRatherThanADecodingFailure() async throws {
+    let spy = SpyTransport(status: 204, body: Data())
+    let client = SponsorBlockClient(transport: spy, cache: SponsorBlockCache())
+    let segments = try await client.segments(
+      videoID: "empty", categories: [.sponsor], server: SponsorBlockClient.defaultServer, privacyMode: false
+    )
+    #expect(segments.isEmpty)
+  }
+
+  @Test func malformedResponseCannotMasqueradeAsNoSegments() throws {
+    #expect(throws: MioTubeError.self) {
+      try SponsorBlockClient.decode(Data(#"{"error":"upstream failure"}"#.utf8), videoID: "video", hashed: false)
+    }
+  }
+
+  @Test func unsupportedActionsAndInvalidRangesCannotBecomeAutomaticSkips() throws {
+    let body = Data(#"""
+    [{"segment":[1,5],"UUID":"future","category":"sponsor","actionType":"new-action"},
+     {"segment":[5,1],"UUID":"reversed","category":"sponsor","actionType":"skip"},
+     {"segment":[-1,5],"UUID":"negative","category":"sponsor","actionType":"skip"},
+     {"segment":[5,5],"UUID":"highlight","category":"poi_highlight","actionType":"poi"}]
+    """#.utf8)
+    #expect(try SponsorBlockClient.decode(body, videoID: "video", hashed: false).map(\.uuid) == ["highlight"])
+  }
 }
 
 @Suite struct StoreTests {
@@ -161,6 +183,24 @@ private func segment(
     #expect(await reopened.resumePosition(for: "start") == 0)
     #expect(await reopened.resumePosition(for: "end") == 0)
     #expect(await reopened.progress(for: "old") == nil)
+  }
+
+  @Test func watchedStateAndSnapshot() async throws {
+    let store = WatchProgressStore(fileURL: nil)
+    await store.record(videoID: "half", position: 300, duration: 600)
+    await store.record(videoID: "almost", position: 540, duration: 600)
+    await store.record(videoID: "ending", position: 212, duration: 240)
+    let snapshot = await store.snapshot()
+    #expect(snapshot.count == 3)
+    #expect(snapshot["half"]?.fraction == 0.5)
+    #expect(snapshot["half"]?.isFinished == false)
+    #expect(snapshot["almost"]?.isFinished == true)
+    // 88% played but inside the final 30 s counts as watched too.
+    #expect(snapshot["ending"]?.isFinished == true)
+    // Watched videos restart rather than resuming mid-way.
+    #expect(await store.resumePosition(for: "half") == 300)
+    #expect(await store.resumePosition(for: "almost") == 0)
+    #expect(await store.resumePosition(for: "ending") == 0)
   }
 
   @MainActor

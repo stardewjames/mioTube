@@ -41,19 +41,35 @@ public struct Captions: Sendable, Hashable {
 }
 
 public enum CaptionsParser {
-  /// Fetches `track` as WebVTT. Nil when unavailable (403/empty/garbage): the UI hides captions;
-  /// there is no retry.
-  public static func fetch(_ track: CaptionTrack, transport: any HTTPTransport) async -> Captions? {
-    var components = URLComponents(url: track.baseURL, resolvingAgainstBaseURL: false)
-    var items = (components?.queryItems ?? []).filter { $0.name != "fmt" }
-    items.append(URLQueryItem(name: "fmt", value: "vtt"))
-    components?.queryItems = items
-    guard let url = components?.url,
-          let response = try? await transport.send(HTTPRequest(url: url, timeout: 15)),
-          !response.data.isEmpty
-    else { return nil }
-    let captions = parse(String(decoding: response.data, as: UTF8.self))
-    return captions.cues.isEmpty ? nil : captions
+  /// Fetches the signed track as WebVTT. An HTTP failure, empty body, or non-VTT response
+  /// is an error, not an empty successful transcript.
+  public static func fetch(_ track: CaptionTrack, transport: any HTTPTransport) async throws -> Captions {
+    let url = try webVTTURL(track.baseURL)
+    let response = try await transport.send(HTTPRequest(url: url, timeout: 15))
+    let text = String(decoding: response.data, as: UTF8.self)
+      .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FEFF}")))
+    guard text == "WEBVTT" || text.hasPrefix("WEBVTT\n") || text.hasPrefix("WEBVTT\r")
+            || text.hasPrefix("WEBVTT ") || text.hasPrefix("WEBVTT\t") else {
+      throw MioTubeError.invalidResponse("YouTube did not return WebVTT captions")
+    }
+    return parse(text)
+  }
+
+  static func webVTTURL(_ baseURL: URL) throws -> URL {
+    guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
+          components.scheme?.lowercased() == "https", components.host != nil,
+          components.user == nil, components.password == nil else {
+      throw MioTubeError.invalidResponse("Invalid captions URL")
+    }
+    // Do not decode/re-encode a signed query: `%2B`, `%2F`, etc. must retain their wire bytes.
+    var parameters = (components.percentEncodedQuery ?? "").split(separator: "&").filter {
+      let name = $0.split(separator: "=", maxSplits: 1).first.map(String.init)?.removingPercentEncoding
+      return name != "fmt" && name != "xosf"
+    }.map(String.init)
+    parameters.append("fmt=vtt")
+    components.percentEncodedQuery = parameters.joined(separator: "&")
+    guard let url = components.url else { throw MioTubeError.invalidResponse("Invalid captions URL") }
+    return url
   }
 
   public static func parse(_ vtt: String) -> Captions {

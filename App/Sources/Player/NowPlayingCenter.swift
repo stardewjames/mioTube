@@ -39,20 +39,26 @@ final class NowPlayingCenter {
     center.skipBackwardCommand.addTarget { _ in status(handlers.skip(-15)) }
   }
 
-  func update(title: String, artist: String, duration: Double, elapsed: Double, rate: Float, isLive: Bool) {
+  func update(title: String, artist: String, duration: Double, elapsed: Double, rate: Float, isLive: Bool, canSeek: Bool) {
     var info: [String: Any] = [
       MPMediaItemPropertyTitle: title,
       MPMediaItemPropertyArtist: artist,
-      MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
       MPNowPlayingInfoPropertyPlaybackRate: rate,
       MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
       MPNowPlayingInfoPropertyIsLiveStream: isLive,
       MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.video.rawValue,
     ]
-    if duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = duration }
+    // Live item time is an absolute DVR timeline, not a VOD playback position.
+    if !isLive {
+      info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed
+      if duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = duration }
+    }
     if let artwork { info[MPMediaItemPropertyArtwork] = artwork }
     MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-    MPRemoteCommandCenter.shared().changePlaybackPositionCommand.isEnabled = !isLive
+    let commands = MPRemoteCommandCenter.shared()
+    commands.changePlaybackPositionCommand.isEnabled = !isLive && canSeek
+    commands.skipForwardCommand.isEnabled = canSeek
+    commands.skipBackwardCommand.isEnabled = canSeek
   }
 
   /// Sets artwork for `url` (decoded thumbnail) and refreshes the info dictionary.
